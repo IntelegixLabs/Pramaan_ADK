@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  handshakeos-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8200:8200"
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=8200
+    command: python main.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/a2a/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  admin-console:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    depends_on:
+      - handshakeos-api
+    environment:
+      - API_BASE=http://handshakeos-api:8200
+    command: streamlit run ui/admin_console.py --server.port 8501 --server.address 0.0.0.0
+
+  # Production additions (commented out for hackathon):
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: handshakeos
+  #     POSTGRES_USER: handshakeos
+  #     POSTGRES_PASSWORD: handshakeos
+  #   ports:
+  #     - "5432:5432"

@@ -1,0 +1,122 @@
+[
+  {
+    "mcp_name": "GitHub MCP Server",
+    "url": "https://api.githubcopilot.com/mcp/"
+  },
+  {
+    "mcp_name": "Microsoft Learn Docs MCP",
+    "url": "https://learn.microsoft.com/api/mcp"
+  },
+  {
+    "mcp_name": "Stripe MCP Server",
+    "url": "https://mcp.stripe.com"
+  },
+  {
+    "mcp_name": "Atlassian Rovo MCP Server",
+    "url": "https://mcp.atlassian.com/v1/mcp/authv2"
+  },
+  {
+    "mcp_name": "Sentry MCP Server",
+    "url": "https://mcp.sentry.dev/mcp"
+  },
+  {
+    "mcp_name": "Notion MCP Server",
+    "url": "https://mcp.notion.com/mcp"
+  },
+  {
+    "mcp_name": "Linear MCP Server",
+    "url": "https://mcp.linear.app/mcp"
+  },
+  {
+    "mcp_name": "Asana MCP Server",
+    "url": "https://mcp.asana.com/v2/mcp"
+  },
+  {
+    "mcp_name": "Slack MCP Server",
+    "url": "https://mcp.slack.com/mcp"
+  },
+  {
+    "mcp_name": "Intercom MCP Server",
+    "url": "https://mcp.intercom.com/mcp"
+  },
+  {
+    "mcp_name": "HubSpot MCP Server",
+    "url": "https://mcp.hubspot.com"
+  },
+  {
+    "mcp_name": "Zapier MCP",
+    "url": "https://mcp.zapier.com/"
+  },
+  {
+    "mcp_name": "PayPal MCP Server",
+    "url": "https://mcp.paypal.com/sse"
+  },
+  {
+    "mcp_name": "Cloudflare API MCP",
+    "url": "https://mcp.cloudflare.com/mcp"
+  },
+  {
+    "mcp_name": "Cloudflare Docs MCP",
+    "url": "https://docs.mcp.cloudflare.com/mcp"
+  },
+  {
+    "mcp_name": "Cloudflare Browser Rendering MCP",
+    "url": "https://browser.mcp.cloudflare.com/mcp"
+  },
+  {
+    "mcp_name": "Cloudflare Observability MCP",
+    "url": "https://observability.mcp.cloudflare.com/mcp"
+  },
+  {
+    "mcp_name": "Cloudflare Audit Logs MCP",
+    "url": "https://auditlogs.mcp.cloudflare.com/mcp"
+  },
+  {
+    "mcp_name": "Cloudflare Radar MCP",
+    "url": "https://radar.mcp.cloudflare.com/mcp"
+  },
+  {
+    "mcp_name": "Hugging Face MCP",
+    "url": "https://huggingface.co/mcp"
+  },
+  {
+    "mcp_name": "Supabase MCP",
+    "url": "https://mcp.supabase.com/mcp"
+  },
+  {
+    "mcp_name": "Neon MCP",
+    "url": "https://mcp.neon.tech/mcp"
+  },
+  {
+    "mcp_name": "Context7 MCP",
+    "url": "https://mcp.context7.com/mcp"
+  },
+  {
+    "mcp_name": "Exa MCP",
+    "url": "https://mcp.exa.ai/mcp"
+  },
+  {
+    "mcp_name": "Tavily MCP",
+    "url": "https://mcp.tavily.com/mcp/"
+  },
+  {
+    "mcp_name": "Browserbase MCP",
+    "url": "https://mcp.browserbase.com/mcp"
+  },
+  {
+    "mcp_name": "Google Drive MCP",
+    "url": "https://drivemcp.googleapis.com/mcp/v1"
+  },
+  {
+    "mcp_name": "Google BigQuery MCP",
+    "url": "https://bigquery.googleapis.com/mcp"
+  },
+  {
+    "mcp_name": "Google Cloud Logging MCP",
+    "url": "https://logging.googleapis.com/mcp"
+  },
+  {
+    "mcp_name": "Azure DevOps MCP",
+    "url": "https://mcp.dev.azure.com/{organization}"
+  }
+]

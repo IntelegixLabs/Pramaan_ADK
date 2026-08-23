@@ -1,0 +1,1 @@
+{"principal": {"user_id": "1", "tenant_id": "1", "role": "hr", "scopes": ["finance.disburse.relocation"], "department": "HR", "environment": "prod"}, "tool": {"name": "finance.disburse.relocation", "risk": "high", "required_scope": "finance.disburse.relocation"}, "context": {"goal_match": true, "amount": 9000}}

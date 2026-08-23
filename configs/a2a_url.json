@@ -1,0 +1,34 @@
+[
+  {
+    "name": "A2A Registry Meta Agent",
+    "agent_card_url": "https://www.a2a-registry.org/.well-known/agent-card.json"
+  },
+  {
+    "name": "CharitySense",
+    "agent_card_url": "https://data.charitysense.com/.well-known/agent.json"
+  },
+  {
+    "name": "Agenda Intelligence MD",
+    "agent_card_url": "https://vassiliylakhonin.github.io/.well-known/agent-card.json"
+  },
+  {
+    "name": "PostalForm",
+    "agent_card_url": "https://postalform.com/.well-known/agent-card.json"
+  },
+  {
+    "name": "Packrift A2A Packaging Procurement Router",
+    "agent_card_url": "https://packrift-agent-discovery-hub.vercel.app/.well-known/agent-card.json"
+  },
+  {
+    "name": "Numbers Online – Phone Intelligence",
+    "agent_card_url": "https://numbers.online/.well-known/agent-card.json"
+  },
+  {
+    "name": "MERCURY Web Fetch",
+    "agent_card_url": "https://network.mercury-hq.com/.well-known/agent-card.json"
+  },
+  {
+    "name": "bilig WorkPaper",
+    "agent_card_url": "https://proompteng.github.io/bilig/agent.json"
+  }
+]
