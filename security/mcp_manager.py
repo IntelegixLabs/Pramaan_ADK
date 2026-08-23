@@ -2,6 +2,7 @@ import sqlite3
 import json
 import uuid
 import os
+from typing import Optional, List, Dict, Any
 
 if os.environ.get("VERCEL"):
     DB_PATH = "/tmp/handshakeos.db"
@@ -62,42 +63,31 @@ class MCPManager:
                     allowed_prompts TEXT
                 )
             ''')
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN allowed_prompts TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN owner TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN is_hosted BOOLEAN DEFAULT 0')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN script_content TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN hosted_tools TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN hosted_resources TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cursor.execute('ALTER TABLE mcp_servers ADD COLUMN hosted_prompts TEXT')
-            except sqlite3.OperationalError:
-                pass
-            conn.commit()
+            columns_to_add = [
+                ('allowed_prompts', 'TEXT'),
+                ('owner', 'TEXT'),
+                ('is_hosted', 'BOOLEAN DEFAULT 0'),
+                ('script_content', 'TEXT'),
+                ('hosted_tools', 'TEXT'),
+                ('hosted_resources', 'TEXT'),
+                ('hosted_prompts', 'TEXT'),
+                ('user_id', 'TEXT')
+            ]
+            for col_name, col_type in columns_to_add:
+                try:
+                    cursor.execute(f'ALTER TABLE mcp_servers ADD COLUMN {col_name} {col_type}')
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
 
-    def get_all_mcps(self):
+    def get_all_mcps(self, user_id: Optional[str] = None):
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM mcp_servers')
+            if user_id:
+                cursor.execute('SELECT * FROM mcp_servers WHERE user_id = ? OR user_id IS NULL', (user_id,))
+            else:
+                cursor.execute('SELECT * FROM mcp_servers')
             mcps = [dict(row) for row in cursor.fetchall()]
             for mcp in mcps:
                 mcp['allowed_tools'] = json.loads(mcp['allowed_tools']) if mcp.get('allowed_tools') else []
@@ -112,7 +102,7 @@ class MCPManager:
             # Prepend default MCPs
             return DEFAULT_MCPS + mcps
 
-    def get_mcp(self, mcp_id: str):
+    def get_mcp(self, mcp_id: str, user_id: Optional[str] = None):
         # Check defaults first
         for default_mcp in DEFAULT_MCPS:
             if default_mcp['id'] == mcp_id:
@@ -121,7 +111,10 @@ class MCPManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM mcp_servers WHERE id = ?', (mcp_id,))
+            if user_id:
+                cursor.execute('SELECT * FROM mcp_servers WHERE id = ? AND (user_id = ? OR user_id IS NULL)', (mcp_id, user_id))
+            else:
+                cursor.execute('SELECT * FROM mcp_servers WHERE id = ?', (mcp_id,))
             row = cursor.fetchone()
             if not row:
                 return None
@@ -179,7 +172,7 @@ class MCPManager:
             if os.path.exists(script_path):
                 os.remove(script_path)
 
-    def create_mcp(self, mcp_data: dict):
+    def create_mcp(self, mcp_data: dict, user_id: Optional[str] = None):
         mcp_id = str(uuid.uuid4())
         # Generate custom proxy URL based on ID
         proxy_url = f"http://localhost:8200/mcp-proxy/{mcp_id}"
@@ -190,9 +183,9 @@ class MCPManager:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO mcp_servers (
-                    id, name, description, owner, server_url, proxy_url, auth_type, auth_token, environment, status, risk_tier, allowed_tools, allowed_resources, allowed_prompts, is_hosted, script_content, hosted_tools, hosted_resources, hosted_prompts
+                    id, name, description, owner, server_url, proxy_url, auth_type, auth_token, environment, status, risk_tier, allowed_tools, allowed_resources, allowed_prompts, is_hosted, script_content, hosted_tools, hosted_resources, hosted_prompts, user_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 mcp_id,
                 mcp_data.get('name', 'Custom MCP Server'),
@@ -212,22 +205,24 @@ class MCPManager:
                 mcp_data.get('script_content', ''),
                 json.dumps(mcp_data.get('hosted_tools', [])),
                 json.dumps(mcp_data.get('hosted_resources', [])),
-                json.dumps(mcp_data.get('hosted_prompts', []))
+                json.dumps(mcp_data.get('hosted_prompts', [])),
+                user_id or mcp_data.get('user_id')
             ))
             conn.commit()
 
-        return self.get_mcp(mcp_id)
+        return self.get_mcp(mcp_id, user_id)
 
-    def update_mcp(self, mcp_id: str, mcp_data: dict):
+    def update_mcp(self, mcp_id: str, mcp_data: dict, user_id: Optional[str] = None):
         self._save_hosted_script(mcp_id, mcp_data)
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            query = '''
                 UPDATE mcp_servers 
                 SET name = ?, description = ?, owner = ?, server_url = ?, auth_type = ?, auth_token = ?, environment = ?, status = ?, risk_tier = ?, allowed_tools = ?, allowed_resources = ?, allowed_prompts = ?, is_hosted = ?, script_content = ?, hosted_tools = ?, hosted_resources = ?, hosted_prompts = ?
                 WHERE id = ?
-            ''', (
+            '''
+            params = [
                 mcp_data.get('name'),
                 mcp_data.get('description'),
                 mcp_data.get('owner'),
@@ -246,15 +241,23 @@ class MCPManager:
                 json.dumps(mcp_data.get('hosted_resources', [])),
                 json.dumps(mcp_data.get('hosted_prompts', [])),
                 mcp_id
-            ))
+            ]
+            if user_id:
+                query += ' AND (user_id = ? OR user_id IS NULL)'
+                params.append(user_id)
+
+            cursor.execute(query, tuple(params))
             conn.commit()
 
-        return self.get_mcp(mcp_id)
+        return self.get_mcp(mcp_id, user_id)
 
-    def delete_mcp(self, mcp_id: str):
+    def delete_mcp(self, mcp_id: str, user_id: Optional[str] = None):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM mcp_servers WHERE id = ?', (mcp_id,))
+            if user_id:
+                cursor.execute('DELETE FROM mcp_servers WHERE id = ? AND (user_id = ? OR user_id IS NULL)', (mcp_id, user_id))
+            else:
+                cursor.execute('DELETE FROM mcp_servers WHERE id = ?', (mcp_id,))
             conn.commit()
 
         import os

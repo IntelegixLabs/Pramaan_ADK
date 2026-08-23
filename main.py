@@ -23,10 +23,12 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 import re
 import uvicorn
+from typing import Optional, Any, Dict, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from starlette.requests import Request
 from starlette.responses import Response
+from security.auth import auth_router, get_optional_user
 
 from identity.vc_issuer import VCIssuer
 from identity.vc_verifier import VCVerifier
@@ -246,6 +248,7 @@ import admin_routes
 app.include_router(admin_routes.router)
 from security.mcp_proxy import router as mcp_proxy_router
 app.include_router(mcp_proxy_router)
+app.include_router(auth_router)
 
 
 # ─── Demo / Convenience Endpoints ───
@@ -1603,7 +1606,7 @@ async def get_redteam_options_endpoint():
 
 
 @app.post("/security/scan-agent")
-async def scan_agent(body: dict):
+async def scan_agent(body: dict, current_user: Optional[dict] = Depends(get_optional_user)):
     """
     Scan an external A2A agent by fetching its agent card and analyzing for vulnerabilities.
 
@@ -1710,13 +1713,15 @@ async def scan_agent(body: dict):
     from security.scan_repository import scan_repository
     from security.dashboard_repository import dashboard_repository
 
+    user_id = current_user.get("user_id") if current_user else None
     target_name = card.get("name", agent_url) if card else agent_url
     scan_repository.save_scan(
         scan_type="agent",
         target_name=target_name,
         findings=report.get("findings", []),
         risk_score=report.get("security_score", 0.0),
-        report=report
+        report=report,
+        user_id=user_id
     )
     dashboard_repository.update_agent_scan_by_url(agent_url, target_name, report.get("security_score", 0.0))
 
@@ -1752,7 +1757,7 @@ async def get_mcp_redteam_options_endpoint():
 
 
 @app.post("/security/scan-mcp")
-async def scan_mcp_server(body: dict):
+async def scan_mcp_server(body: dict, current_user: Optional[dict] = Depends(get_optional_user)):
     """
     Run simulated security scan against an MCP SSE endpoint.
     Body: { "mcp_url": "http://localhost:8000/sse" }
@@ -1777,12 +1782,14 @@ async def scan_mcp_server(body: dict):
     # Save to database
     from security.scan_repository import scan_repository
     from security.dashboard_repository import dashboard_repository
+    user_id = current_user.get("user_id") if current_user else None
     scan_repository.save_scan(
         scan_type="mcp",
         target_name=mcp_url,
         findings=report.get("findings", []),
         risk_score=report.get("security_score", 0.0),
-        report=report
+        report=report,
+        user_id=user_id
     )
     dashboard_repository.update_agent_scan_by_url(mcp_url, mcp_url, report.get("security_score", 0.0))
 
@@ -1790,7 +1797,7 @@ async def scan_mcp_server(body: dict):
 
 
 @app.post("/security/scan-agent-card")
-async def scan_agent_card_direct(body: dict):
+async def scan_agent_card_direct(body: dict, current_user: Optional[dict] = Depends(get_optional_user)):
     """
     Directly scan a provided agent card JSON (no fetching needed).
     Body: { "card": { ... agent card JSON ... } }
@@ -1806,13 +1813,15 @@ async def scan_agent_card_direct(body: dict):
     from security.scan_repository import scan_repository
     from security.dashboard_repository import dashboard_repository
 
+    user_id = current_user.get("user_id") if current_user else None
     target_name = card.get("name", "Direct Input Agent")
     scan_repository.save_scan(
         scan_type="agent",
         target_name=target_name,
         findings=report.get("findings", []),
         risk_score=report.get("security_score", 0.0),
-        report=report
+        report=report,
+        user_id=user_id
     )
     # Use empty URL for direct inputs, or whatever identifier
     dashboard_repository.update_agent_scan_by_url("", target_name, report.get("security_score", 0.0))

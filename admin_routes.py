@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
-from typing import List, Dict
+from fastapi import APIRouter, HTTPException, Depends
+from typing import List, Dict, Optional, Any
 import httpx
 from pydantic import BaseModel
+from security.auth import get_optional_user
 
 
 class UrlValidateRequest(BaseModel):
@@ -154,15 +155,9 @@ async def validate_url(body: UrlValidateRequest):
 
 
 @router.get("/agents")
-async def get_custom_agents():
-    return agent_manager.get_all_agents()
-
-
-@router.delete("/agents/{agent_id}")
-async def delete_custom_agent(agent_id: str):
-    if agent_manager.delete_agent(agent_id):
-        return {"status": "deleted"}
-    raise HTTPException(status_code=404, detail="Agent not found")
+async def get_custom_agents(current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    return agent_manager.get_all_agents(user_id=user_id)
 
 
 # --- RAG Knowledge Base ---
@@ -219,29 +214,34 @@ async def delete_document(doc_id: str):
 
 
 @router.get("/agents/{agent_id}")
-async def get_custom_agent(agent_id: str):
-    agent = agent_manager.get_agent(agent_id)
+async def get_custom_agent(agent_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    agent = agent_manager.get_agent(agent_id, user_id=user_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 
 
 @router.post("/agents")
-async def create_custom_agent(agent_data: dict):
-    agent = agent_manager.create_agent(agent_data)
+async def create_custom_agent(agent_data: dict, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    agent = agent_manager.create_agent(agent_data, user_id=user_id)
     return agent
 
 
 @router.put("/agents/{agent_id}")
-async def update_custom_agent(agent_id: str, agent_data: dict):
-    agent = agent_manager.update_agent(agent_id, agent_data)
+async def update_custom_agent(agent_id: str, agent_data: dict, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    agent = agent_manager.update_agent(agent_id, agent_data, user_id=user_id)
     return agent
 
 
 @router.delete("/agents/{agent_id}")
-async def delete_custom_agent(agent_id: str):
-    agent_manager.delete_agent(agent_id)
-    return {"status": "success"}
+async def delete_custom_agent(agent_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    if agent_manager.delete_agent(agent_id, user_id=user_id):
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Agent not found")
 
 
 # --- Security Scans ---
@@ -249,13 +249,15 @@ from security.scan_repository import scan_repository
 
 
 @router.get("/scans")
-async def get_security_scans():
-    return {"scans": scan_repository.get_all_scans()}
+async def get_security_scans(current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    return {"scans": scan_repository.get_all_scans(user_id=user_id)}
 
 
 @router.delete("/scans/{scan_id}")
-async def delete_security_scan(scan_id: str):
-    if scan_repository.delete_scan(scan_id):
+async def delete_security_scan(scan_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    if scan_repository.delete_scan(scan_id, user_id=user_id):
         return {"status": "success"}
     raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -656,29 +658,34 @@ from security.mcp_manager import mcp_manager
 
 
 @router.get("/mcps")
-async def get_all_mcps():
-    return mcp_manager.get_all_mcps()
+async def get_all_mcps(current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    return mcp_manager.get_all_mcps(user_id=user_id)
 
 
 @router.get("/mcps/{mcp_id}")
-async def get_mcp(mcp_id: str):
-    mcp = mcp_manager.get_mcp(mcp_id)
+async def get_mcp(mcp_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    mcp = mcp_manager.get_mcp(mcp_id, user_id=user_id)
     if not mcp:
         raise HTTPException(status_code=404, detail="MCP not found")
     return mcp
 
 
 @router.post("/mcps")
-async def create_mcp(mcp_data: dict):
-    return mcp_manager.create_mcp(mcp_data)
+async def create_mcp(mcp_data: dict, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    return mcp_manager.create_mcp(mcp_data, user_id=user_id)
 
 
 @router.put("/mcps/{mcp_id}")
-async def update_mcp(mcp_id: str, mcp_data: dict):
-    return mcp_manager.update_mcp(mcp_id, mcp_data)
+async def update_mcp(mcp_id: str, mcp_data: dict, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    return mcp_manager.update_mcp(mcp_id, mcp_data, user_id=user_id)
 
 
 @router.delete("/mcps/{mcp_id}")
-async def delete_mcp(mcp_id: str):
-    mcp_manager.delete_mcp(mcp_id)
+async def delete_mcp(mcp_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = current_user.get("user_id") if current_user else None
+    mcp_manager.delete_mcp(mcp_id, user_id=user_id)
     return {"status": "success"}

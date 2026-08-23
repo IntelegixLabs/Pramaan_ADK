@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from threading import Lock
 
 class ScanRepository:
-    """Repository for storing and retrieving security scan results."""
+    """Repository for storing and retrieving security scan results with user data isolation."""
 
     def __init__(self, db_path: str = None):
         if db_path is None:
@@ -33,11 +33,17 @@ class ScanRepository:
                     target_name TEXT NOT NULL,
                     findings_json TEXT NOT NULL,
                     risk_score REAL NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    report_json TEXT,
+                    user_id TEXT
                 );
             ''')
             try:
                 self._conn.execute("ALTER TABLE security_scans ADD COLUMN report_json TEXT;")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute("ALTER TABLE security_scans ADD COLUMN user_id TEXT;")
             except sqlite3.OperationalError:
                 pass
             self._conn.commit()
@@ -47,20 +53,23 @@ class ScanRepository:
             self.initialize()
         return self._conn
 
-    def save_scan(self, scan_type: str, target_name: str, findings: list, risk_score: float, report: dict = None) -> str:
+    def save_scan(self, scan_type: str, target_name: str, findings: list, risk_score: float, report: dict = None, user_id: Optional[str] = None) -> str:
         conn = self._get_conn()
         scan_id = str(uuid.uuid4())
         with self._write_lock:
             conn.execute(
-                "INSERT INTO security_scans (scan_id, scan_type, target_name, findings_json, risk_score, created_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (scan_id, scan_type, target_name, json.dumps(findings), risk_score, datetime.now(timezone.utc).isoformat(), json.dumps(report) if report else None)
+                "INSERT INTO security_scans (scan_id, scan_type, target_name, findings_json, risk_score, created_at, report_json, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (scan_id, scan_type, target_name, json.dumps(findings), risk_score, datetime.now(timezone.utc).isoformat(), json.dumps(report) if report else None, user_id)
             )
             conn.commit()
         return scan_id
 
-    def get_all_scans(self) -> List[Dict]:
+    def get_all_scans(self, user_id: Optional[str] = None) -> List[Dict]:
         conn = self._get_conn()
-        rows = conn.execute("SELECT * FROM security_scans ORDER BY created_at DESC").fetchall()
+        if user_id:
+            rows = conn.execute("SELECT * FROM security_scans WHERE user_id = ? OR user_id IS NULL ORDER BY created_at DESC", (user_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM security_scans ORDER BY created_at DESC").fetchall()
         
         results = []
         for r in rows:
@@ -68,32 +77,41 @@ class ScanRepository:
                 "scan_id": r["scan_id"],
                 "scan_type": r["scan_type"],
                 "target_name": r["target_name"],
-                "findings": json.loads(r["findings_json"]),
+                "findings": json.loads(r["findings_json"]) if r["findings_json"] else [],
                 "risk_score": r["risk_score"],
                 "created_at": r["created_at"],
-                "report": json.loads(r["report_json"]) if "report_json" in r.keys() and r["report_json"] else None
+                "report": json.loads(r["report_json"]) if "report_json" in r.keys() and r["report_json"] else None,
+                "user_id": r["user_id"] if "user_id" in r.keys() else None,
             })
         return results
 
-    def get_scan(self, scan_id: str) -> Optional[Dict]:
+    def get_scan(self, scan_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
         conn = self._get_conn()
-        r = conn.execute("SELECT * FROM security_scans WHERE scan_id = ?", (scan_id,)).fetchone()
+        if user_id:
+            r = conn.execute("SELECT * FROM security_scans WHERE scan_id = ? AND (user_id = ? OR user_id IS NULL)", (scan_id, user_id)).fetchone()
+        else:
+            r = conn.execute("SELECT * FROM security_scans WHERE scan_id = ?", (scan_id,)).fetchone()
+            
         if r:
             return {
                 "scan_id": r["scan_id"],
                 "scan_type": r["scan_type"],
                 "target_name": r["target_name"],
-                "findings": json.loads(r["findings_json"]),
+                "findings": json.loads(r["findings_json"]) if r["findings_json"] else [],
                 "risk_score": r["risk_score"],
                 "created_at": r["created_at"],
-                "report": json.loads(r["report_json"]) if "report_json" in r.keys() and r["report_json"] else None
+                "report": json.loads(r["report_json"]) if "report_json" in r.keys() and r["report_json"] else None,
+                "user_id": r["user_id"] if "user_id" in r.keys() else None,
             }
         return None
 
-    def delete_scan(self, scan_id: str) -> bool:
+    def delete_scan(self, scan_id: str, user_id: Optional[str] = None) -> bool:
         conn = self._get_conn()
         with self._write_lock:
-            cursor = conn.execute("DELETE FROM security_scans WHERE scan_id = ?", (scan_id,))
+            if user_id:
+                cursor = conn.execute("DELETE FROM security_scans WHERE scan_id = ? AND (user_id = ? OR user_id IS NULL)", (scan_id, user_id))
+            else:
+                cursor = conn.execute("DELETE FROM security_scans WHERE scan_id = ?", (scan_id,))
             conn.commit()
             return cursor.rowcount > 0
 
