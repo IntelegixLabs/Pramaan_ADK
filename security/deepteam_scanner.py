@@ -25,24 +25,25 @@ async def run_redteam_scan(
         agent_id: str,
         agent_name: str,
         audit_logger: Optional[AuditLogger] = None,
-        simulator_model: str = os.getenv("DEEPTEAM_SIMULATOR_MODEL", "gpt-4o-mini"),
-        evaluation_model: str = os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gpt-4o"),
+        simulator_model: str = os.getenv("DEEPTEAM_SIMULATOR_MODEL", "gemini/gemini-2.5-flash"),
+        evaluation_model: str = os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gemini/gemini-2.5-flash"),
         attacks_per_vuln: int = 2,
 ) -> dict:
     """Run a DeepTeam red-team scan against a specific agent."""
 
     callback = create_agent_callback(agent_id)
 
-    # red_team() is synchronous and long-running (it drives the LLM-based
-    # attack simulations). Run it in a worker thread so it does not block the
-    # FastAPI event loop while the scan is in progress.
-    os.environ.setdefault("OPENAI_MAX_RETRIES", "5")
+    # Configure DeepTeam to use Gemini
+    from deepeval.models import GeminiModel
+    sim_model_obj = simulator_model if not isinstance(simulator_model, str) else GeminiModel(model=simulator_model.replace("gemini/", ""))
+    eval_model_obj = evaluation_model if not isinstance(evaluation_model, str) else GeminiModel(model=evaluation_model.replace("gemini/", ""))
+
     risk_assessment = await asyncio.to_thread(
         red_team,
         model_callback=callback,
         framework=OWASP_ASI_2026(),
-        simulator_model=simulator_model,
-        evaluation_model=evaluation_model,
+        simulator_model=sim_model_obj,
+        evaluation_model=eval_model_obj,
         attacks_per_vulnerability_type=attacks_per_vuln,
         max_concurrent=1,
         target_purpose=TARGET_PURPOSE,

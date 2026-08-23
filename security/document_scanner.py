@@ -1,7 +1,7 @@
 import logging
 import json
-from langchain_core.messages import SystemMessage, HumanMessage
-from llm_factory import build_llm
+from google.genai import types
+from llm_factory import get_genai_client, build_llm_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +25,23 @@ def scan_document(filename: str, content: str) -> dict:
     """Scans document content using an LLM to enforce agentic security policies."""
     logger.info(f"Scanning document: {filename} ({len(content)} chars)")
     try:
-        llm = build_llm()
+        client = get_genai_client()
+        model_name = build_llm_model_name()
         
         # Truncate content to avoid token limits for the scan
         content_sample = content[:4000]
         
-        messages = [
-            SystemMessage(content=SCAN_PROMPT),
-            HumanMessage(content=f"FILENAME: {filename}\n\nCONTENT:\n{content_sample}")
-        ]
-        
-        response = llm.invoke(messages)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[f"FILENAME: {filename}\n\nCONTENT:\n{content_sample}"],
+            config=types.GenerateContentConfig(
+                system_instruction=SCAN_PROMPT,
+                temperature=0.0
+            )
+        )
         
         # Extract JSON from response
-        text = response.content.strip()
+        text = response.text.strip()
         if text.startswith("```json"):
             text = text[7:]
         if text.startswith("```"):

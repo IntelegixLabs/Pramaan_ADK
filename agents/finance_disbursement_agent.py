@@ -13,13 +13,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Iterator
 
-from langchain_core.tools import tool
-from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
-from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langgraph.prebuilt import create_react_agent
+from google.adk import Agent, Runner
+from google.adk.tools import FunctionTool
 
-from llm_factory import build_llm, get_llm_info, is_live
+from llm_factory import build_llm_model_name, get_llm_info, is_live
 from observability.tracer import get_langfuse_handler, langfuse_context
 
 logger = logging.getLogger(__name__)
@@ -37,14 +34,13 @@ from agl.trust_receipt import TrustReceipt
 
 
 # ────────────────────────────────────────────────────────
-# LangChain Tools for Finance Disbursement Governance
+# ADK Tools for Finance Disbursement Governance
 # ────────────────────────────────────────────────────────
 
 # Module-level receipt store so tools can access it
 _executed_receipts_store: set[str] = set()
 
 
-@tool
 def verify_trust_receipt(receipt_json: str) -> str:
     """Verify a Trust Receipt is valid and approved for payment execution.
     Returns verification result including receipt ID and decision."""
@@ -80,7 +76,6 @@ def verify_trust_receipt(receipt_json: str) -> str:
     })
 
 
-@tool
 def execute_payment(receipt_id: str, handshake_id: str, action: str, requester: str) -> str:
     """Execute the payment after Trust Receipt verification.
     Marks the receipt as used (one-time-use enforcement)."""
@@ -102,7 +97,6 @@ def execute_payment(receipt_id: str, handshake_id: str, action: str, requester: 
     })
 
 
-@tool
 def check_duplicate_receipt(receipt_id: str) -> str:
     """Check if a Trust Receipt has already been used (replay protection)."""
     is_duplicate = receipt_id in _executed_receipts_store
@@ -132,16 +126,16 @@ Allowed actions: finance.disburse.relocation
 
 
 # ────────────────────────────────────────────────────────
-# Finance Disbursement Agent — LangChain + A2A SDK
+# Finance Disbursement Agent — ADK + A2A SDK
 # ────────────────────────────────────────────────────────
 
 class FinanceDisbursementAgent(A2AAgentExecutor):
     """
-    LangChain-based Finance Disbursement Agent with A2A SDK compatibility.
+    ADK-based Finance Disbursement Agent with A2A SDK compatibility.
 
-    Uses LangChain tools (verify_trust_receipt, execute_payment, check_duplicate_receipt)
+    Uses ADK tools (verify_trust_receipt, execute_payment, check_duplicate_receipt)
     for payment governance. When a live LLM is configured (via API key env vars),
-    uses real LLM reasoning via create_react_agent. Otherwise falls back to
+    uses real LLM reasoning via Agent. Otherwise falls back to
     deterministic tool execution.
     """
 
@@ -152,67 +146,65 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
         self.agent_name = "Finance Disbursement Agent"
         self._executed_receipts: set[str] = _executed_receipts_store
 
-        # ── LangChain Agent Setup ──
+        # ── ADK Agent Setup ──
         self.tools = [
-            verify_trust_receipt,
-            execute_payment,
-            check_duplicate_receipt,
+            FunctionTool(func=verify_trust_receipt),
+            FunctionTool(func=execute_payment),
+            FunctionTool(func=check_duplicate_receipt),
         ]
 
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", FINANCE_SYSTEM_PROMPT),
-            MessagesPlaceholder(variable_name="chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-
         # Use the LLM factory — auto-detects API keys
-        self._llm = build_llm()
+        model_name = build_llm_model_name()
+        
+        self.agent = Agent(
+            name="finance_disbursement_agent",
+            model=model_name,
+            instruction=FINANCE_SYSTEM_PROMPT,
+            tools=self.tools
+        )
         self._llm_info = get_llm_info()
         logger.info(f"Finance Agent LLM: {self._llm_info.mode} ({self._llm_info.provider})")
 
     def _run_tools_directly(self, trust_receipt_data: dict, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
         """
         Deterministic tool execution — runs governance tools in sequence.
-        Uses LangChain tools directly for Trust Receipt verification and payment.
+        Uses ADK tools directly for Trust Receipt verification and payment.
         """
         results = []
         handler = get_langfuse_handler()
 
         with langfuse_context(session_id=session_id, user_id=user_id, tags=tags):
-            # Step 1: Verify Trust Receipt via LangChain tool
-            verify_result_str = verify_trust_receipt.invoke({
-            "receipt_json": json.dumps(trust_receipt_data),
-        }, config={"callbacks": [handler]} if handler else None)
-        results.append(f"verify_trust_receipt → {verify_result_str}")
-        verify_result = json.loads(verify_result_str)
+            # Step 1: Verify Trust Receipt via tool
+            verify_result_str = verify_trust_receipt(json.dumps(trust_receipt_data))
+            results.append(f"verify_trust_receipt → {verify_result_str}")
+            verify_result = json.loads(verify_result_str)
 
-        if not verify_result.get("valid"):
+            if not verify_result.get("valid"):
+                return {
+                    "output": f"Payment rejected: {verify_result.get('reason', 'Unknown')}",
+                    "status": "REJECTED",
+                    "reason": verify_result.get("reason", "Verification failed"),
+                    "tool_results": results,
+                }
+
+            # Step 2: Execute payment via tool
+            payment_result_str = execute_payment(
+                receipt_id=verify_result["receipt_id"],
+                handshake_id=verify_result["handshake_id"],
+                action=verify_result["action"],
+                requester=verify_result["requester"]
+            )
+            results.append(f"execute_payment → {payment_result_str}")
+            payment_result = json.loads(payment_result_str)
+
             return {
-                "output": f"Payment rejected: {verify_result.get('reason', 'Unknown')}",
-                "status": "REJECTED",
-                "reason": verify_result.get("reason", "Verification failed"),
+                "output": f"Payment executed. ID: {payment_result['paymentId']}. "
+                          f"Trust Receipt: {verify_result['receipt_id']}. "
+                          f"ADK tools: verify_trust_receipt, execute_payment.",
+                "status": "EXECUTED",
+                "payment": payment_result,
                 "tool_results": results,
             }
-
-        # Step 2: Execute payment via LangChain tool
-        payment_result_str = execute_payment.invoke({
-            "receipt_id": verify_result["receipt_id"],
-            "handshake_id": verify_result["handshake_id"],
-            "action": verify_result["action"],
-            "requester": verify_result["requester"],
-        }, config={"callbacks": [handler]} if handler else None)
-        results.append(f"execute_payment → {payment_result_str}")
-        payment_result = json.loads(payment_result_str)
-
-        return {
-            "output": f"Payment executed. ID: {payment_result['paymentId']}. "
-                      f"Trust Receipt: {verify_result['receipt_id']}. "
-                      f"LangChain tools: verify_trust_receipt, execute_payment.",
-            "status": "EXECUTED",
-            "payment": payment_result,
-            "tool_results": results,
-        }
 
     @property
     def llm_mode(self) -> str:
@@ -226,8 +218,8 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
 
     def invoke_langchain(self, trust_receipt_data: dict, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
         """
-        Run the LangChain agent for Trust Receipt verification and payment.
-        When a live LLM is available, uses real LLM reasoning via create_react_agent.
+        Run the ADK agent for Trust Receipt verification and payment.
+        When a live LLM is available, uses real LLM reasoning via ADK Runner.
         Otherwise falls back to deterministic tool execution.
         """
         if is_live():
@@ -236,46 +228,57 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
 
     def _run_with_live_llm(self, trust_receipt_data: dict, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
         """
-        Use the real LLM with create_react_agent for intelligent tool selection.
+        Use the real LLM with Runner for intelligent tool selection.
         The LLM decides which tools to call and in what order.
         """
         try:
-            agent = create_react_agent(self._llm, self.tools)
-            handler = get_langfuse_handler()
-            config = {"callbacks": [handler]} if handler else None
+            runner = Runner(agent=self.agent)
             
+            prompt = (f"Process this Trust Receipt and execute the payment if valid:\n"
+                      f"{json.dumps(trust_receipt_data, indent=2)}")
+                      
+            all_messages = []
+            
+            # Since Langfuse isn't a direct callback in ADK like Langchain config, 
+            # we run it under the context. 
             with langfuse_context(session_id=session_id, user_id=user_id, tags=tags):
-                result = agent.invoke({
-                    "messages": [
-                        HumanMessage(content=(
-                            f"{FINANCE_SYSTEM_PROMPT}\n\n"
-                            f"Process this Trust Receipt and execute the payment if valid:\n"
-                            f"{json.dumps(trust_receipt_data, indent=2)}"
-                        ))
-                    ]
-                }, config=config)
+                for event in runner.run(
+                    user_id=user_id or "default_user",
+                    session_id=session_id or f"session_{int(time.time())}",
+                    new_message=prompt
+                ):
+                    if event.message:
+                        all_messages.append(event.message)
+
             # Extract the final message from the agent
-            messages = result.get("messages", [])
-            final_msg = messages[-1].content if messages else "Payment processed via live LLM."
+            final_msg = "Payment processed via live LLM."
+            if all_messages and hasattr(all_messages[-1], 'content') and all_messages[-1].content:
+                final_msg = all_messages[-1].content
 
             # Check if payment was executed by looking at tool results
             payment_data = None
-            for msg in messages:
-                if hasattr(msg, 'content') and isinstance(msg.content, str):
-                    try:
-                        parsed = json.loads(msg.content)
-                        if parsed.get("paymentId"):
-                            payment_data = parsed
-                        elif parsed.get("valid") is False:
-                            return {
-                                "output": f"Payment rejected: {parsed.get('reason', 'Unknown')}",
-                                "status": "REJECTED",
-                                "reason": parsed.get("reason", "Verification failed"),
-                                "tool_results": [str(msg.content) for msg in messages],
-                                "llm_mode": "live",
-                            }
-                    except (json.JSONDecodeError, TypeError):
-                        continue
+            tool_result_strs = []
+            
+            for msg in all_messages:
+                msg_dict = msg.model_dump()
+                if msg_dict.get("role") == "tool" and msg_dict.get("tool_responses"):
+                    for tr in msg_dict["tool_responses"]:
+                        response_str = str(tr.get("response", ""))
+                        tool_result_strs.append(f"{tr.get('name')} -> {response_str}")
+                        try:
+                            parsed = json.loads(response_str)
+                            if parsed.get("paymentId"):
+                                payment_data = parsed
+                            elif parsed.get("valid") is False:
+                                return {
+                                    "output": f"Payment rejected: {parsed.get('reason', 'Unknown')}",
+                                    "status": "REJECTED",
+                                    "reason": parsed.get("reason", "Verification failed"),
+                                    "tool_results": tool_result_strs,
+                                    "llm_mode": "live",
+                                }
+                        except (json.JSONDecodeError, TypeError):
+                            continue
 
             if payment_data:
                 return {
@@ -283,7 +286,7 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
                               f"Trust Receipt verified and payment confirmed.",
                     "status": "EXECUTED",
                     "payment": payment_data,
-                    "tool_results": [str(msg.content) for msg in messages],
+                    "tool_results": tool_result_strs,
                     "llm_mode": "live",
                 }
 
@@ -291,7 +294,7 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
                 "output": final_msg,
                 "status": "EXECUTED",
                 "payment": {},
-                "tool_results": [str(msg.content) for msg in messages],
+                "tool_results": tool_result_strs,
                 "llm_mode": "live",
             }
 
@@ -375,7 +378,7 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
         # Publish payment confirmation artifact
         payment_data = lc_result.get("payment", {})
         metadata_struct = struct_pb2.Struct()
-        metadata_struct.update({**payment_data, "framework": "langchain"})
+        metadata_struct.update({**payment_data, "framework": "google-adk"})
 
         await event_queue.enqueue_event(
             TaskArtifactUpdateEvent(
@@ -425,7 +428,7 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
 
     async def execute_direct(self, request: dict) -> dict:
         """Direct execution for the AGL gateway (non-A2A-SDK path).
-        Delegates to LangChain tools internally."""
+        Delegates to ADK tools internally."""
         now = datetime.now(timezone.utc).isoformat()
         task_id = f"task-{uuid.uuid4().hex[:8]}"
 
@@ -437,12 +440,12 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
             return {"taskId": task_id, "status": "TASK_STATE_REJECTED",
                     "reason": "No Trust Receipt found.", "timestamp": now}
 
-        # Use LangChain agent for verification + execution
+        # Use ADK agent for verification + execution
         lc_result = self.invoke_langchain(
             trust_receipt_data,
             session_id=task_id,
             user_id=self.agent_did,
-            tags=[self.agent_name, "langchain", "payment-execution"]
+            tags=[self.agent_name, "google-adk", "payment-execution"]
         )
 
         if lc_result["status"] == "REJECTED":
@@ -457,13 +460,13 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
             "taskId": task_id,
             "status": "TASK_STATE_COMPLETED",
             "timestamp": now,
-            "framework": "langchain",
+            "framework": "google-adk",
             "artifacts": [{
                 "name": "payment-confirmation",
                 "parts": [{"type": "application/json", "data": {
                     **payment,
                     "description": request_text,
-                    "langchainTools": ["verify_trust_receipt", "execute_payment"],
+                    "adkTools": ["verify_trust_receipt", "execute_payment"],
                 }}],
             }],
             "history": [{"role": "agent", "parts": [
@@ -481,12 +484,12 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
             "poaQuorum": "3-of-5",
             "revocationSlaMs": 1000,
             "zkpRequired": True,
-            "framework": "langchain",
+            "framework": "google-adk",
         })
 
         return AgentCard(
             name="Finance Disbursement Agent",
-            description="LangChain-based agent that executes approved employee relocation payments after AGL trust validation",
+            description="ADK-based agent that executes approved employee relocation payments after AGL trust validation",
             version="1.0.0",
             supported_interfaces=[
                 AgentInterface(
@@ -510,7 +513,7 @@ class FinanceDisbursementAgent(A2AAgentExecutor):
                     id="release-relocation-payment",
                     name="Release Relocation Payment",
                     description="Disburses relocation support after AGL trust validation",
-                    tags=["finance", "relocation", "payment", "langchain"],
+                    tags=["finance", "relocation", "payment", "google-adk"],
                 ),
             ],
             default_input_modes=["application/json"],

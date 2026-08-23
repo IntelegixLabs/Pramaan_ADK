@@ -6,31 +6,60 @@ import logging
 from typing import List, Dict, Any
 
 from pypdf import PdfReader
-from langchain_chroma import Chroma
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-from langchain_openai import OpenAIEmbeddings
+import chromadb
+from google.genai import Client
 
 logger = logging.getLogger(__name__)
 
-# Try to use OpenAI Embeddings if key exists, otherwise let Chroma use default (or throw if not configured properly)
-def get_embeddings():
-    if os.getenv("OPENAI_API_KEY"):
-        return OpenAIEmbeddings(model="text-embedding-3-small")
-    else:
-        # Fallback to local sentence transformers if available, otherwise mock
-        try:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
-            return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        except ImportError:
+def recursive_text_split(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[str]:
+    """A simple recursive character text splitter."""
+    if len(text) <= chunk_size:
+        return [text]
+    
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        
+        # Try to find a good breaking point
+        if end < len(text):
+            # Look for paragraph break
+            break_point = text.rfind('\n\n', start, end)
+            if break_point == -1 or break_point < start + chunk_size // 2:
+                # Look for sentence break
+                break_point = text.rfind('. ', start, end)
+            if break_point == -1 or break_point < start + chunk_size // 2:
+                # Look for space
+                break_point = text.rfind(' ', start, end)
+                
+            if break_point != -1 and break_point > start:
+                end = break_point + 1 # Include the break character
+                
+        chunks.append(text[start:end].strip())
+        start = end - chunk_overlap
+        
+        # Prevent infinite loop if we can't progress
+        if start >= end:
+            start = end
+            
+    return chunks
+
+class GoogleGenAIEmbeddingFunction(chromadb.EmbeddingFunction):
+    def __init__(self):
+        self.client = None
+        if os.getenv("GOOGLE_API_KEY"):
+            self.client = Client()
+            
+    def __call__(self, input: chromadb.Documents) -> chromadb.Embeddings:
+        if not self.client:
             # Fake embeddings for completely offline demo without dependencies
-            from langchain_core.embeddings import Embeddings
-            class FakeEmbeddings(Embeddings):
-                def embed_documents(self, texts: List[str]) -> List[List[float]]:
-                    return [[0.1] * 1536 for _ in texts]
-                def embed_query(self, text: str) -> List[float]:
-                    return [0.1] * 1536
-            return FakeEmbeddings()
+            return [[0.1] * 768 for _ in input]
+            
+        response = self.client.models.embed_content(
+            model="text-embedding-004",
+            contents=input
+        )
+        return [e.values for e in response.embeddings]
 
 if os.environ.get("VERCEL"):
     DB_DIR = "/tmp/.ag_chroma"
@@ -40,16 +69,15 @@ else:
 class RAGManager:
     def __init__(self):
         os.makedirs(DB_DIR, exist_ok=True)
-        self.vector_store = Chroma(
-            collection_name="knowledge_base",
-            embedding_function=get_embeddings(),
-            persist_directory=DB_DIR
+        
+        self.chroma_client = chromadb.PersistentClient(path=DB_DIR)
+        self.embedding_function = GoogleGenAIEmbeddingFunction()
+        
+        self.collection = self.chroma_client.get_or_create_collection(
+            name="knowledge_base",
+            embedding_function=self.embedding_function
         )
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-        )
+        
         self.metadata_file = os.path.join(DB_DIR, "documents_metadata.json")
         self.texts_file = os.path.join(DB_DIR, "document_texts.json")
         
@@ -100,14 +128,17 @@ class RAGManager:
                 raise ValueError("No extractable text found in file.")
                 
             doc_id = str(uuid.uuid4())
-            chunks = self.text_splitter.create_documents(
-                [text], 
-                metadatas=[{"source": filename, "doc_id": doc_id}]
-            )
+            chunks = recursive_text_split(text)
             
             # Add to Chroma
             ids = [str(uuid.uuid4()) for _ in chunks]
-            self.vector_store.add_documents(documents=chunks, ids=ids)
+            metadatas = [{"source": filename, "doc_id": doc_id} for _ in chunks]
+            
+            self.collection.add(
+                documents=chunks,
+                metadatas=metadatas,
+                ids=ids
+            )
             
             doc_info = {
                 "id": doc_id,
@@ -132,14 +163,8 @@ class RAGManager:
 
     def delete_document(self, doc_id: str):
         if doc_id in self.documents_metadata:
-            # Delete from Chroma using metadata filter
-            # Note: chroma delete by metadata requires where clause
-            # The chromadb client supports where clause directly via the vector store
             try:
-                # We can fetch the chunks by doc_id to get their IDs and then delete by IDs
-                results = self.vector_store.get(where={"doc_id": doc_id})
-                if results and results.get("ids"):
-                    self.vector_store.delete(ids=results["ids"])
+                self.collection.delete(where={"doc_id": doc_id})
             except Exception as e:
                 logger.error(f"Failed to delete vectors for {doc_id}: {e}")
             
@@ -152,12 +177,21 @@ class RAGManager:
 
     def query(self, query_text: str, k: int = 3) -> str:
         """Retrieve relevant context for a query."""
-        results = self.vector_store.similarity_search(query_text, k=k)
-        if not results:
+        results = self.collection.query(
+            query_texts=[query_text],
+            n_results=k
+        )
+        
+        if not results or not results['documents'] or not results['documents'][0]:
             return "No relevant information found in the knowledge base."
             
-        context = "\n\n---\n\n".join([f"Source: {doc.metadata.get('source', 'Unknown')}\n{doc.page_content}" for doc in results])
-        return context
+        context_parts = []
+        for i, doc in enumerate(results['documents'][0]):
+            meta = results['metadatas'][0][i] if results['metadatas'] and results['metadatas'][0] else {}
+            source = meta.get('source', 'Unknown')
+            context_parts.append(f"Source: {source}\n{doc}")
+            
+        return "\n\n---\n\n".join(context_parts)
 
 # Singleton instance
 rag_manager = RAGManager()

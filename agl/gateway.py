@@ -600,11 +600,19 @@ async def get_agent_card(agent_id: str, request: Request = None):
             # Return realistic-looking canary card to gather intel
             canary_card = _gateway._honeypot.get_canary_agent_card(agent_id)
             if canary_card:
+                # canary_card is typically already a dict
                 return JSONResponse(content=canary_card)
 
     card = AGENT_CARDS.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent card not found: {agent_id}")
+    
+    # If it's a pydantic model (AgentCard from a2a-sdk), call model_dump()
+    if hasattr(card, "model_dump"):
+        card = card.model_dump()
+    elif hasattr(card, "dict"):
+        card = card.dict()
+
     return JSONResponse(content=card)
 
 

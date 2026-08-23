@@ -5,6 +5,7 @@ from deepteam.guardrails.guards import (
     ToxicityGuard,
     CybersecurityGuard,
 )
+from deepeval.models import GeminiModel
 import os
 import asyncio
 import logging
@@ -36,7 +37,8 @@ def get_guardrails() -> Guardrails:
                 PrivacyGuard(),
                 ToxicityGuard(),
             ],
-            evaluation_model=os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gpt-4o"),
+            # Use standard deepteam framework with Gemini
+            evaluation_model=GeminiModel(model=os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gemini-2.5-flash").replace("gemini/", "")),
             sample_rate=1.0,
         )
     return _guardrails

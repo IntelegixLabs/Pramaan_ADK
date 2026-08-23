@@ -3,19 +3,17 @@ import logging
 import time
 from typing import Any, Callable
 
-from langchain_core.tools import tool, Tool, StructuredTool
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from google.adk import Agent, Runner, types
+from google.adk.tools import FunctionTool
 
-from llm_factory import build_llm
+from llm_factory import build_llm_model_name
 from security.agent_manager import agent_manager
 
 logger = logging.getLogger(__name__)
 
 
-def create_dynamic_tool(name: str, description: str, code_str: str) -> Tool:
-    """Safely (for demo purposes) evaluate code_str to create a python function, and wrap it in a Langchain Tool."""
+def create_dynamic_tool(name: str, description: str, code_str: str) -> FunctionTool:
+    """Safely (for demo purposes) evaluate code_str to create a python function, and wrap it in a google-adk FunctionTool."""
     local_env = {}
     try:
         # We expect the code_str to define a function with the same name as the tool
@@ -29,23 +27,20 @@ def create_dynamic_tool(name: str, description: str, code_str: str) -> Tool:
             else:
                 raise ValueError(f"No callable function found in code for tool {name}")
 
-        # Wrap it in a Langchain Tool
-        return Tool(
-            name=name,
-            description=description,
-            func=func
-        )
+        func.__doc__ = description
+        func.__name__ = name
+        return FunctionTool(func=func)
     except Exception as e:
         logger.error(f"Failed to compile custom tool {name}: {e}")
-        return Tool(
-            name=name,
-            description=description,
-            func=lambda *args, **kwargs: f"Error executing tool {name}: {e}"
-        )
+        def fallback_func(*args, **kwargs):
+            return f"Error executing tool {name}: {e}"
+        fallback_func.__doc__ = description
+        fallback_func.__name__ = name
+        return FunctionTool(func=fallback_func)
 
 
-def create_a2a_tool(url: str, index: int) -> Tool:
-    """Creates a LangChain tool that communicates with an A2A agent URL.
+def create_a2a_tool(url: str, index: int) -> FunctionTool:
+    """Creates a google-adk tool that communicates with an A2A agent URL.
 
     Supports two modes:
     1. Local agents (same server): Extracts agent_id from the URL and invokes
@@ -84,39 +79,18 @@ def create_a2a_tool(url: str, index: int) -> Tool:
 
                 target_agent_data = agent_manager.get_agent(local_agent_id)
                 if target_agent_data:
-                    from llm_factory import build_llm
-                    from langchain_core.messages import HumanMessage, SystemMessage
-
                     target_name = target_agent_data.get("name", local_agent_id)
                     logger.info(
                         f"[A2A Delegation] 🎯 Target agent: '{target_name}', system_prompt length={len(target_agent_data.get('system_prompt', ''))}")
 
-                    llm = build_llm()
-                    target_tools = []
-                    for t in target_agent_data.get("tools", []):
-                        if t.get("code"):
-                            target_tools.append(create_dynamic_tool(t["name"], t["description"], t["code"]))
-
-                    logger.info(f"[A2A Delegation] 🔧 Target agent tools: {[t.name for t in target_tools]}")
-
-                    target_executor = create_react_agent(llm, target_tools)
-                    messages = [
-                        SystemMessage(content=target_agent_data.get("system_prompt", "You are a helpful assistant.")),
-                        HumanMessage(content=task_message)
-                    ]
-                    result = target_executor.invoke({"messages": messages})
-                    result_messages = result.get("messages", [])
+                    target_runner = CustomAgentRunner(local_agent_id)
+                    response = target_runner.invoke(task_message)
 
                     elapsed_ms = (time.time() - t0) * 1000
                     logger.info(
-                        f"[A2A Delegation] ✅ Agent '{target_name}' completed in {elapsed_ms:.1f}ms, {len(result_messages)} messages")
+                        f"[A2A Delegation] ✅ Agent '{target_name}' completed in {elapsed_ms:.1f}ms")
 
-                    if result_messages:
-                        response = result_messages[-1].content
-                        logger.info(
-                            f"[A2A Delegation] 📩 Response: {response[:200]}{'...' if len(response) > 200 else ''}")
-                        return response
-                    return "Agent completed but returned no response."
+                    return response
                 else:
                     logger.warning(f"[A2A Delegation] ❌ Agent {local_agent_id} not found in database")
                     return f"Error: Agent {local_agent_id} not found in database."
@@ -195,16 +169,15 @@ def create_a2a_tool(url: str, index: int) -> Tool:
 
     # Use a sanitized agent name for the tool
     safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', agent_name).lower().strip('_')
+    
+    delegate.__name__ = f"delegate_to_{safe_name}" if safe_name else f"delegate_to_agent_{index}"
+    delegate.__doc__ = f"Delegate a task to the '{agent_name}' agent. Send a natural language message describing what you need this agent to do, and it will process the request and return the result."
 
-    return Tool(
-        name=f"delegate_to_{safe_name}" if safe_name else f"delegate_to_agent_{index}",
-        description=f"Delegate a task to the '{agent_name}' agent. Send a natural language message describing what you need this agent to do, and it will process the request and return the result.",
-        func=delegate
-    )
+    return FunctionTool(func=delegate)
 
 
 def create_mcp_tools(url: str, index: int) -> list:
-    """Creates LangChain tools that communicate with an MCP Server.
+    """Creates google-adk tools that communicate with an MCP Server.
 
     Discovers the server's REAL tools (name, description, JSON input schema) via
     the proxy and builds schema-aware StructuredTools, so the LLM emits correctly
@@ -274,7 +247,9 @@ def create_mcp_tools(url: str, index: int) -> list:
             logger.info(f"[MCP Tool Call] ✅ Tool '{tool_name}' completed in {elapsed_ms:.1f}ms")
             logger.info(f"[MCP Tool Call] 📩 Result: {str(result)[:300]}{'...' if len(str(result)) > 300 else ''}")
             return result
-
+            
+        handler.__name__ = tool_name
+        handler.__doc__ = f"Provided by MCP Server: {mcp_name}"
         return handler
 
     # ── 1) Live discovery: fetch the real tool schemas from the MCP server ──
@@ -300,18 +275,14 @@ def create_mcp_tools(url: str, index: int) -> list:
     except Exception as e:
         logger.warning(f"MCP live tool discovery failed for {mcp_name} ({url}): {e}")
 
-    langchain_tools = []
+    adk_tools = []
 
     if discovered:
         for t in discovered:
-            schema = t.get("schema") or {"type": "object", "properties": {}}
-            langchain_tools.append(StructuredTool.from_function(
-                func=make_handler(t["name"]),
-                name=t["name"],
-                description=f"{t.get('description') or t['name']} (Provided by MCP Server: {mcp_name})",
-                args_schema=schema,
-            ))
-        return langchain_tools
+            handler = make_handler(t["name"])
+            handler.__doc__ = t.get('description') or t['name']
+            adk_tools.append(FunctionTool(func=handler))
+        return adk_tools
 
     # ── 2) Fallback: build from stored DB metadata (no live schema available) ──
     all_tools = mcp_data.get("hosted_tools", []) + mcp_data.get("allowed_tools", [])
@@ -327,21 +298,11 @@ def create_mcp_tools(url: str, index: int) -> list:
         if not tool_name:
             continue
 
-        if schema:
-            langchain_tools.append(StructuredTool.from_function(
-                func=make_handler(tool_name),
-                name=tool_name,
-                description=f"{tool_desc} (Provided by MCP Server: {mcp_name})",
-                args_schema=schema,
-            ))
-        else:
-            langchain_tools.append(Tool(
-                name=f"{tool_name}",
-                description=f"{tool_desc} (Provided by MCP Server: {mcp_name})",
-                func=make_handler(tool_name),
-            ))
+        handler = make_handler(tool_name)
+        handler.__doc__ = f"{tool_desc} (Provided by MCP Server: {mcp_name})"
+        adk_tools.append(FunctionTool(func=handler))
 
-    return langchain_tools
+    return adk_tools
 
 
 class CustomAgentRunner:
@@ -356,7 +317,7 @@ class CustomAgentRunner:
         self.agent_name = self.agent_data.get("name", f"Agent-{agent_id[:8]}")
         logger.info(f"[Agent Init] 🤖 Initializing agent '{self.agent_name}' (id={agent_id})")
 
-        self.llm = build_llm()
+        model_name = build_llm_model_name()
         self.tools = []
 
         # Read tool execution boundaries
@@ -415,9 +376,14 @@ class CustomAgentRunner:
         logger.info(
             f"[Agent Init] ✅ Agent '{self.agent_name}' ready with {len(self.tools)} tools: {[t.name for t in self.tools]}")
 
-        self.agent_executor = create_react_agent(self.llm, self.tools)
+        self.agent = Agent(
+            name=self.agent_name.replace(" ", "_"),
+            model=model_name,
+            instruction=self.agent_data.get("system_prompt", "You are a helpful assistant."),
+            tools=self.tools
+        )
 
-    def _wrap_with_human_review(self, original_tool: Tool) -> Tool:
+    def _wrap_with_human_review(self, original_tool: FunctionTool) -> FunctionTool:
         """Wrap a tool so it pauses for human approval before executing."""
         import time
         from security.human_review import human_review_queue
@@ -486,11 +452,9 @@ class CustomAgentRunner:
             logger.warning(f"[HumanReview] Tool '{tool_name}' TIMED OUT after {timeout_seconds}s (review {review_id})")
             return f"⏱️ Human review for tool '{tool_name}' timed out after {timeout_seconds} seconds. The tool call was not executed. Please try again after a reviewer is available."
 
-        return Tool(
-            name=original_tool.name,
-            description=original_tool.description,
-            func=gated_func
-        )
+        gated_func.__name__ = tool_name
+        gated_func.__doc__ = tool_description
+        return FunctionTool(func=gated_func)
 
     def invoke(self, message: str) -> str:
         """Run the agent with a user message."""
@@ -500,21 +464,27 @@ class CustomAgentRunner:
                 f"[Agent Run] ▶️  Agent '{self.agent_name}' processing: {message[:200]}{'...' if len(message) > 200 else ''}")
             t_start = time.time()
 
-            messages = [
-                SystemMessage(content=self.agent_data.get("system_prompt", "You are a helpful assistant.")),
-                HumanMessage(content=message)
-            ]
-            result = self.agent_executor.invoke({"messages": messages})
-            all_messages = result.get("messages", [])
+            runner = Runner(agent=self.agent, app_name=f"pramaan-{self.agent_id}")
+            
+            all_messages = []
+            final_response = "No response."
+            
+            for event in runner.run(
+                user_id="default_user",
+                session_id=f"session_{self.agent_id}_{int(time.time())}",
+                new_message=message
+            ):
+                if event.message:
+                    all_messages.append(event.message)
+                    if hasattr(event.message, 'content'):
+                        final_response = event.message.content
 
             elapsed_ms = (time.time() - t_start) * 1000
 
             # Log detailed trace of all intermediate steps
             self._log_message_trace(all_messages, elapsed_ms)
 
-            if all_messages:
-                return all_messages[-1].content
-            return "No response."
+            return final_response
         except Exception as e:
             logger.error(f"[Agent Run] ❌ Agent '{self.agent_name}' failed: {e}")
             return f"Agent execution failed: {e}"
@@ -529,59 +499,55 @@ class CustomAgentRunner:
                 f"[Agent Run] ▶️  Agent '{self.agent_name}' processing: {message[:200]}{'...' if len(message) > 200 else ''}")
             t_start = time.time()
 
-            messages = [
-                SystemMessage(content=self.agent_data.get("system_prompt", "You are a helpful assistant.")),
-                HumanMessage(content=message)
-            ]
-            result = self.agent_executor.invoke({"messages": messages})
-            all_messages = result.get("messages", [])
+            runner = Runner(agent=self.agent, app_name=f"pramaan-{self.agent_id}")
+            
+            all_messages = []
+            final_response = "No response."
+            
+            for event in runner.run(
+                user_id="default_user",
+                session_id=f"session_{self.agent_id}_{int(time.time())}",
+                new_message=message
+            ):
+                if event.message:
+                    all_messages.append(event.message)
+                    if hasattr(event.message, 'content') and event.message.content:
+                        final_response = event.message.content
 
             elapsed_ms = (time.time() - t_start) * 1000
 
             # Build structured trace
             for msg in all_messages:
-                if isinstance(msg, SystemMessage):
-                    trace_steps.append({
-                        "type": "system_prompt",
-                        "content": msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
-                    })
-                elif isinstance(msg, HumanMessage):
+                # Basic mapping from ADK Event/Message to trace_steps
+                msg_dict = msg.model_dump()
+                role = msg_dict.get("role")
+                
+                if role == "user":
                     trace_steps.append({
                         "type": "user_message",
-                        "content": msg.content
+                        "content": str(msg_dict.get("content", ""))
                     })
-                elif isinstance(msg, AIMessage):
+                elif role == "model":
                     step = {"type": "ai_reasoning"}
-                    if msg.content:
-                        step["thinking"] = msg.content
-
-                    # Extract tool calls
-                    tool_calls = getattr(msg, 'tool_calls', None) or []
-                    if not tool_calls:
-                        tool_calls = getattr(msg, 'additional_kwargs', {}).get('tool_calls', [])
-
+                    if msg_dict.get("content"):
+                        step["thinking"] = str(msg_dict.get("content", ""))
+                        
+                    tool_calls = msg_dict.get("tool_calls", [])
                     if tool_calls:
                         step["type"] = "tool_call"
                         step["tool_calls"] = []
                         for tc in tool_calls:
-                            if isinstance(tc, dict):
-                                tc_info = {
-                                    "tool_name": tc.get("name", "unknown"),
-                                    "arguments": tc.get("args", tc.get("arguments", {})),
-                                }
-                            else:
-                                tc_info = {
-                                    "tool_name": getattr(tc, 'name', 'unknown'),
-                                    "arguments": getattr(tc, 'args', {}),
-                                }
+                            tc_info = {
+                                "tool_name": tc.get("name", "unknown"),
+                                "arguments": tc.get("args", {}),
+                            }
 
                             # Classify the tool call type
                             tool_name = tc_info["tool_name"]
                             if tool_name.startswith("delegate_to_"):
                                 tc_info["call_type"] = "a2a_delegation"
                                 tc_info["icon"] = "🤝"
-                            elif any(t.name == tool_name and "(Provided by MCP Server:" in t.description for t in
-                                     self.tools):
+                            elif any(t.name == tool_name and "(Provided by MCP Server:" in t.description for t in self.tools):
                                 tc_info["call_type"] = "mcp_tool"
                                 tc_info["icon"] = "🔌"
                             else:
@@ -591,19 +557,20 @@ class CustomAgentRunner:
                             step["tool_calls"].append(tc_info)
 
                     trace_steps.append(step)
-
-                elif isinstance(msg, ToolMessage):
-                    trace_steps.append({
-                        "type": "tool_result",
-                        "tool_name": getattr(msg, 'name', 'unknown'),
-                        "result": msg.content[:500] if msg.content else "",
-                        "tool_call_id": getattr(msg, 'tool_call_id', ''),
-                    })
+                
+                elif role == "tool":
+                    # Tool response mapping
+                    if msg_dict.get("tool_responses"):
+                        for tr in msg_dict["tool_responses"]:
+                            trace_steps.append({
+                                "type": "tool_result",
+                                "tool_name": tr.get("name", "unknown"),
+                                "result": str(tr.get("response", ""))[:500],
+                                "tool_call_id": tr.get("id", ""),
+                            })
 
             # Log the trace
             self._log_message_trace(all_messages, elapsed_ms)
-
-            final_response = all_messages[-1].content if all_messages else "No response."
 
             return {
                 "response": final_response,
@@ -629,31 +596,27 @@ class CustomAgentRunner:
         ai_step_count = 0
 
         for msg in messages:
-            if isinstance(msg, SystemMessage):
+            msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else {}
+            role = msg_dict.get("role")
+            
+            if role == "user":
                 continue
-            elif isinstance(msg, HumanMessage):
-                continue
-            elif isinstance(msg, AIMessage):
+            elif role == "model":
                 ai_step_count += 1
 
                 # Log thinking/reasoning
-                if msg.content:
+                content = msg_dict.get("content")
+                if content:
+                    content_str = str(content)
                     logger.info(
-                        f"[Agent Think] 💭 Step {ai_step_count} reasoning: {msg.content[:300]}{'...' if len(msg.content) > 300 else ''}")
+                        f"[Agent Think] 💭 Step {ai_step_count} reasoning: {content_str[:300]}{'...' if len(content_str) > 300 else ''}")
 
                 # Log tool calls
-                tool_calls = getattr(msg, 'tool_calls', None) or []
-                if not tool_calls:
-                    tool_calls = getattr(msg, 'additional_kwargs', {}).get('tool_calls', [])
-
+                tool_calls = msg_dict.get("tool_calls", [])
                 for tc in tool_calls:
                     tool_call_count += 1
-                    if isinstance(tc, dict):
-                        name = tc.get("name", "unknown")
-                        args = tc.get("args", tc.get("arguments", {}))
-                    else:
-                        name = getattr(tc, 'name', 'unknown')
-                        args = getattr(tc, 'args', {})
+                    name = tc.get("name", "unknown")
+                    args = tc.get("args", {})
 
                     if name.startswith("delegate_to_"):
                         logger.info(
@@ -662,11 +625,13 @@ class CustomAgentRunner:
                         logger.info(
                             f"[Agent Action] 🔧 Tool Call #{tool_call_count}: calling '{name}' with: {json.dumps(args, default=str)[:300]}")
 
-            elif isinstance(msg, ToolMessage):
-                tool_name = getattr(msg, 'name', 'unknown')
-                result_preview = msg.content[:300] if msg.content else "(empty)"
-                logger.info(
-                    f"[Agent Result] 📦 Tool '{tool_name}' returned: {result_preview}{'...' if len(msg.content or '') > 300 else ''}")
+            elif role == "tool":
+                for tr in msg_dict.get("tool_responses", []):
+                    tool_name = tr.get("name", "unknown")
+                    response = str(tr.get("response", ""))
+                    result_preview = response[:300] if response else "(empty)"
+                    logger.info(
+                        f"[Agent Result] 📦 Tool '{tool_name}' returned: {result_preview}{'...' if len(response) > 300 else ''}")
 
         logger.info(
             f"[Agent Run] ✅ Agent '{self.agent_name}' completed in {elapsed_ms:.1f}ms | {ai_step_count} reasoning steps | {tool_call_count} tool calls | {len(messages)} total messages")

@@ -153,13 +153,13 @@ class SecurityScannerAgent:
             })
             return self._merge_reports(base_report, dynamic_findings)
 
-        if not os.getenv("OPENAI_API_KEY"):
+        if not os.getenv("GOOGLE_API_KEY"):
             dynamic_findings.append({
                 "title": "Red Team Scan Skipped",
-                "finding": "OPENAI_API_KEY not configured",
+                "finding": "GOOGLE_API_KEY not configured",
                 "severity": "info",
-                "description": "DeepTeam red teaming requires an OpenAI API key.",
-                "recommendation": "Set OPENAI_API_KEY environment variable to enable dynamic simulation."
+                "description": "DeepTeam red teaming requires a Google API key.",
+                "recommendation": "Set GOOGLE_API_KEY environment variable to enable dynamic simulation."
             })
             return self._merge_reports(base_report, dynamic_findings)
 
@@ -168,8 +168,13 @@ class SecurityScannerAgent:
         attacks_per_vuln = max(1, int(config.get("attacks_per_vuln", 1) or 1))
         max_concurrent = max(1, min(1, int(config.get("max_concurrent", 1) or 1)))  # force serial to avoid rate limits
         throttle_s = max(0.5, float(config.get("throttle_ms", 500) or 500) / 1000.0)  # minimum 500ms throttle
-        simulator_model = config.get("simulator_model") or os.getenv("DEEPTEAM_SIMULATOR_MODEL", "gpt-4o-mini")
-        evaluation_model = config.get("evaluation_model") or os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gpt-4o-mini")
+        
+        # Configure DeepTeam to use Gemini
+        from deepeval.models import GeminiModel
+        sim_model_name = (config.get("simulator_model") or os.getenv("DEEPTEAM_SIMULATOR_MODEL", "gemini-2.5-flash")).replace("gemini/", "")
+        eval_model_name = (config.get("evaluation_model") or os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gemini-2.5-flash")).replace("gemini/", "")
+        simulator_model = GeminiModel(model=sim_model_name)
+        evaluation_model = GeminiModel(model=eval_model_name)
 
         import sys
         import io

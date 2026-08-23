@@ -11,15 +11,13 @@ import hashlib
 import json
 import logging
 import uuid
+import re
 from typing import Optional, Any, Iterator
 
-from langchain_core.tools import tool
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage
-from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langgraph.prebuilt import create_react_agent
+from google.adk import Agent, Runner
+from google.adk.tools import FunctionTool
 
-from llm_factory import build_llm, get_llm_info, is_live
+from llm_factory import build_llm_model_name, get_llm_info, is_live
 from observability.tracer import get_langfuse_handler, langfuse_context
 
 logger = logging.getLogger(__name__)
@@ -43,10 +41,9 @@ from agl.governance_envelope import (
 
 
 # ────────────────────────────────────────────────────────
-# LangChain Tools for HR Relocation Governance
+# ADK Tools for HR Relocation Governance
 # ────────────────────────────────────────────────────────
 
-@tool
 def create_relocation_case(employee_case_ref: str, amount: float, currency: str = "USD", description: str = "") -> str:
     """Create a new employee relocation case with the specified amount and reference."""
     case = {
@@ -60,7 +57,6 @@ def create_relocation_case(employee_case_ref: str, amount: float, currency: str 
     return json.dumps(case)
 
 
-@tool
 def validate_relocation_amount(amount: float, max_limit: float = 10000.0) -> str:
     """Validate that the relocation amount is within the allowed policy limit."""
     if amount <= 0:
@@ -70,7 +66,6 @@ def validate_relocation_amount(amount: float, max_limit: float = 10000.0) -> str
     return json.dumps({"valid": True, "amount": amount, "limit": max_limit, "headroom": max_limit - amount})
 
 
-@tool
 def check_agent_authority(action: str, allowed_actions: str, forbidden_actions: str) -> str:
     """Check if the agent has authority to perform the requested action.
     allowed_actions and forbidden_actions should be comma-separated lists."""
@@ -83,7 +78,6 @@ def check_agent_authority(action: str, allowed_actions: str, forbidden_actions: 
     return json.dumps({"authorized": False, "reason": f"Action '{action}' not in allowed actions"})
 
 
-@tool
 def prepare_governance_envelope_data(
     requester_did: str,
     target_did: str,
@@ -127,16 +121,16 @@ Forbidden actions: finance.payment.approve, finance.payment.release
 
 
 # ────────────────────────────────────────────────────────
-# HR Relocation Agent — LangChain + A2A SDK
+# HR Relocation Agent — ADK + A2A SDK
 # ────────────────────────────────────────────────────────
 
 class HRRelocationAgent(A2AAgentExecutor):
     """
-    LangChain-based HR Relocation Agent with A2A SDK compatibility.
+    ADK-based HR Relocation Agent with A2A SDK compatibility.
 
-    Uses LangChain tools and AgentExecutor for reasoning. When a live LLM
+    Uses ADK tools and Agent for reasoning. When a live LLM
     is configured (via API key env vars), uses real LLM reasoning via
-    create_react_agent. Otherwise falls back to deterministic tool execution.
+    ADK Runner. Otherwise falls back to deterministic tool execution.
     """
 
     ALLOWED_ACTIONS = [
@@ -160,30 +154,30 @@ class HRRelocationAgent(A2AAgentExecutor):
         self.model_hash = hashlib.sha256(f"{agent_did}-model-config".encode()).hexdigest()
         self.prompt_hash = hashlib.sha256(f"{agent_did}-system-prompt".encode()).hexdigest()
 
-        # ── LangChain Agent Setup ──
+        # ── ADK Agent Setup ──
         self.tools = [
-            create_relocation_case,
-            validate_relocation_amount,
-            check_agent_authority,
-            prepare_governance_envelope_data,
+            FunctionTool(func=create_relocation_case),
+            FunctionTool(func=validate_relocation_amount),
+            FunctionTool(func=check_agent_authority),
+            FunctionTool(func=prepare_governance_envelope_data),
         ]
 
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", HR_SYSTEM_PROMPT),
-            MessagesPlaceholder(variable_name="chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
+        model_name = build_llm_model_name()
+        
+        self.agent = Agent(
+            name="hr_relocation_agent",
+            model=model_name,
+            instruction=HR_SYSTEM_PROMPT,
+            tools=self.tools
+        )
 
-        # Use the LLM factory — auto-detects API keys
-        self._llm = build_llm()
         self._llm_info = get_llm_info()
         logger.info(f"HR Agent LLM: {self._llm_info.mode} ({self._llm_info.provider})")
 
     def _run_tools_directly(self, user_input: str, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
         """
         Deterministic tool execution — runs governance tools in sequence.
-        This is the primary execution path: it uses LangChain tools but
+        This is the primary execution path: it uses ADK tools but
         drives them deterministically (no LLM needed for tool selection).
         """
         results = []
@@ -199,33 +193,34 @@ class HRRelocationAgent(A2AAgentExecutor):
                 pass
 
         with langfuse_context(session_id=session_id, user_id=user_id, tags=tags):
-            # Step 1: Validate amount via LangChain tool
-            val_result = validate_relocation_amount.invoke({"amount": amount}, config={"callbacks": [handler]} if handler else None)
+            # Step 1: Validate amount via tool
+            val_result = validate_relocation_amount(amount=amount)
             results.append(f"validate_relocation_amount → {val_result}")
 
-            # Step 2: Check authority via LangChain tool
-            auth_result = check_agent_authority.invoke({
-                "action": "relocation.disbursement.request",
-                "allowed_actions": ",".join(self.ALLOWED_ACTIONS),
-                "forbidden_actions": ",".join(self.FORBIDDEN_ACTIONS),
-            }, config={"callbacks": [handler]} if handler else None)
+            # Step 2: Check authority via tool
+            auth_result = check_agent_authority(
+                action="relocation.disbursement.request",
+                allowed_actions=",".join(self.ALLOWED_ACTIONS),
+                forbidden_actions=",".join(self.FORBIDDEN_ACTIONS)
+            )
             results.append(f"check_agent_authority → {auth_result}")
 
-            # Step 3: Create case via LangChain tool
-            case_result = create_relocation_case.invoke({
-                "employee_case_ref": f"case-{uuid.uuid4().hex[:6]}",
-                "amount": amount,
-            }, config={"callbacks": [handler]} if handler else None)
+            # Step 3: Create case via tool
+            case_ref = f"case-{uuid.uuid4().hex[:6]}"
+            case_result = create_relocation_case(
+                employee_case_ref=case_ref,
+                amount=amount
+            )
             results.append(f"create_relocation_case → {case_result}")
 
-            # Step 4: Prepare envelope via LangChain tool
-            env_result = prepare_governance_envelope_data.invoke({
-                "requester_did": self.agent_did,
-                "target_did": "did:gcc:agent:finance-disbursement-02",
-                "action": "finance.disburse.relocation",
-                "case_ref": f"case-{uuid.uuid4().hex[:6]}",
-                "amount": amount,
-            }, config={"callbacks": [handler]} if handler else None)
+            # Step 4: Prepare envelope via tool
+            env_result = prepare_governance_envelope_data(
+                requester_did=self.agent_did,
+                target_did="did:gcc:agent:finance-disbursement-02",
+                action="finance.disburse.relocation",
+                case_ref=case_ref,
+                amount=amount
+            )
             results.append(f"prepare_governance_envelope_data → {env_result}")
 
         return {
@@ -234,7 +229,7 @@ class HRRelocationAgent(A2AAgentExecutor):
                 f"Relocation request prepared (${amount:,.0f}). "
                 f"Governance envelope ready for AGL handshake. "
                 f"Agent: {self.agent_did}. "
-                f"LangChain tools executed: validate_relocation_amount, "
+                f"ADK tools executed: validate_relocation_amount, "
                 f"check_agent_authority, create_relocation_case, "
                 f"prepare_governance_envelope_data."
             ),
@@ -251,10 +246,10 @@ class HRRelocationAgent(A2AAgentExecutor):
         """Return the LLM provider name."""
         return self._llm_info.provider
 
-    def invoke_langchain(self, user_input: str, chat_history: list = None, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
+    def invoke_adk(self, user_input: str, chat_history: list = None, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
         """
-        Run the LangChain agent.
-        When a live LLM is available, uses real LLM reasoning via create_react_agent.
+        Run the ADK agent.
+        When a live LLM is available, uses real LLM reasoning via ADK Runner.
         Otherwise falls back to deterministic tool execution.
         """
         if is_live():
@@ -263,27 +258,38 @@ class HRRelocationAgent(A2AAgentExecutor):
 
     def _run_with_live_llm(self, user_input: str, session_id: str = None, user_id: str = None, tags: list = None) -> dict:
         """
-        Use the real LLM with create_react_agent for intelligent tool selection.
+        Use the real LLM with Runner for intelligent tool selection.
         """
         try:
-            agent = create_react_agent(self._llm, self.tools)
-            handler = get_langfuse_handler()
-            config = {"callbacks": [handler]} if handler else None
+            runner = Runner(agent=self.agent)
+            
+            all_messages = []
             
             with langfuse_context(session_id=session_id, user_id=user_id, tags=tags):
-                result = agent.invoke({
-                    "messages": [
-                        {"role": "user", "content": f"{HR_SYSTEM_PROMPT}\n\nUser Request: {user_input}"}
-                    ]
-                }, config=config)
+                for event in runner.run(
+                    user_id=user_id or "default_user",
+                    session_id=session_id or f"session_{int(time.time())}",
+                    new_message=user_input
+                ):
+                    if event.message:
+                        all_messages.append(event.message)
                 
-            messages = result.get("messages", [])
-            final_msg = messages[-1].content if messages else "Relocation request processed via live LLM."
+            final_msg = "Relocation request processed via live LLM."
+            if all_messages and hasattr(all_messages[-1], 'content') and all_messages[-1].content:
+                final_msg = all_messages[-1].content
+
+            # Extract tool responses for the trace
+            tool_result_strs = []
+            for msg in all_messages:
+                msg_dict = msg.model_dump()
+                if msg_dict.get("role") == "tool" and msg_dict.get("tool_responses"):
+                    for tr in msg_dict["tool_responses"]:
+                        tool_result_strs.append(f"{tr.get('name')} -> {tr.get('response', '')}")
 
             return {
                 "input": user_input,
                 "output": final_msg,
-                "tool_results": [str(msg.content) for msg in messages],
+                "tool_results": tool_result_strs,
                 "llm_mode": "live",
             }
         except Exception as e:
@@ -295,7 +301,7 @@ class HRRelocationAgent(A2AAgentExecutor):
     # ── A2A SDK AgentExecutor interface ──
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """A2A SDK execute — delegates to LangChain agent internally."""
+        """A2A SDK execute — delegates to ADK agent internally."""
         request = context.request
         task_id = context.task_id or str(uuid.uuid4())
         context_id = context.context_id or str(uuid.uuid4())
@@ -316,24 +322,24 @@ class HRRelocationAgent(A2AAgentExecutor):
                     user_text = part.text
                     break
 
-        # Run LangChain agent
-        lc_result = self.invoke_langchain(
+        # Run ADK agent
+        lc_result = self.invoke_adk(
             user_text,
             session_id=context_id,
             user_id=self.owner_human,
-            tags=[self.agent_name, "langchain", "hr-relocation"]
+            tags=[self.agent_name, "google-adk", "hr-relocation"]
         )
         agent_output = lc_result.get("output", "Request processed")
 
         response_data = {
             "agent": self.agent_did,
             "agentName": self.agent_name,
-            "framework": "langchain",
+            "framework": "google-adk",
             "businessDomain": self.business_domain,
             "requestType": "relocation-disbursement",
             "ownerHuman": self.owner_human,
             "allowedActions": self.ALLOWED_ACTIONS,
-            "langchainTools": [t.name for t in self.tools],
+            "adkTools": [t.name for t in self.tools],
             "message": agent_output,
             "status": "request_prepared",
         }
@@ -349,7 +355,7 @@ class HRRelocationAgent(A2AAgentExecutor):
                     name="hr-relocation-request",
                     parts=[
                         Part(
-                            text=f"Relocation request prepared by {self.agent_name} (LangChain): {agent_output}",
+                            text=f"Relocation request prepared by {self.agent_name} (ADK): {agent_output}",
                             metadata=metadata_struct,
                         )
                     ],
@@ -395,12 +401,12 @@ class HRRelocationAgent(A2AAgentExecutor):
             "poaQuorum": "2-of-3",
             "revocationSlaMs": 1000,
             "zkpRequired": True,
-            "framework": "langchain",
+            "framework": "google-adk",
         })
 
         return AgentCard(
             name="HR Relocation Agent",
-            description="LangChain-based agent that creates employee relocation payment requests with AGL governance",
+            description="ADK-based agent that creates employee relocation payment requests with AGL governance",
             version="1.0.0",
             supported_interfaces=[
                 AgentInterface(
@@ -424,7 +430,7 @@ class HRRelocationAgent(A2AAgentExecutor):
                     id="request-relocation-disbursement",
                     name="Request Relocation Disbursement",
                     description="Submits a relocation payment request to Finance Agent via AGL governance",
-                    tags=["hr", "relocation", "payment-request", "langchain"],
+                    tags=["hr", "relocation", "payment-request", "google-adk"],
                 ),
             ],
             default_input_modes=["application/json", "text/plain"],
@@ -443,27 +449,27 @@ class HRRelocationAgent(A2AAgentExecutor):
         description: str = "",
         session_id: str = None,
     ) -> dict:
-        """Create a relocation request — runs LangChain tools for validation."""
+        """Create a relocation request — runs ADK tools for validation."""
         handler = get_langfuse_handler()
         with langfuse_context(session_id=session_id, user_id=self.owner_human, tags=[self.agent_name, "relocation-request"]):
-            val_result = validate_relocation_amount.invoke({"amount": amount}, config={"callbacks": [handler]} if handler else None)
+            val_result = validate_relocation_amount(amount=amount)
         validation = json.loads(val_result)
 
         return {
             "request_data": {
                 "type": "relocation-disbursement",
-                "employeeCaseRef": employee_case_ref,
+                "employeeCaseRef": case_ref,
                 "amount": amount,
-                "currency": currency,
-                "description": description or f"Relocation disbursement for case {employee_case_ref}",
+                "currency": "USD",
+                "description": description or f"Relocation disbursement for case {case_ref}",
                 "validation": validation,
             },
             "amount": amount,
-            "case_ref": employee_case_ref,
+            "case_ref": case_ref,
             "description": description,
         }
 
-    def prepare_governed_request(
+    def build_governed_request(
         self,
         amount: float,
         case_ref: str,
