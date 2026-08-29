@@ -1,18 +1,27 @@
+"""
+Pramaan ADK - Database-Backed Vector RAG Manager
+================================================
+Stores documents, chunk metadata, and vector embeddings directly in PostgreSQL / Database
+without relying on local ephemeral storage or local ChromaDB files.
+"""
+
 import os
 import io
 import uuid
 import json
+import math
+import time
+import hashlib
 import logging
-from typing import List, Dict, Any
-
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
 from pypdf import PdfReader
-import chromadb
-from google.genai import Client
+from security.db import db
 
 logger = logging.getLogger(__name__)
 
 def recursive_text_split(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[str]:
-    """A simple recursive character text splitter."""
+    """Recursive character text splitter."""
     if len(text) <= chunk_size:
         return [text]
     
@@ -21,32 +30,23 @@ def recursive_text_split(text: str, chunk_size: int = 1000, chunk_overlap: int =
     while start < len(text):
         end = min(start + chunk_size, len(text))
         
-        # Try to find a good breaking point
         if end < len(text):
-            # Look for paragraph break
             break_point = text.rfind('\n\n', start, end)
             if break_point == -1 or break_point < start + chunk_size // 2:
-                # Look for sentence break
                 break_point = text.rfind('. ', start, end)
             if break_point == -1 or break_point < start + chunk_size // 2:
-                # Look for space
                 break_point = text.rfind(' ', start, end)
                 
             if break_point != -1 and break_point > start:
-                end = break_point + 1 # Include the break character
+                end = break_point + 1
                 
         chunks.append(text[start:end].strip())
         start = end - chunk_overlap
         
-        # Prevent infinite loop if we can't progress
         if start >= end:
             start = end
             
     return chunks
-
-import hashlib
-import math
-import time
 
 def generate_local_embedding(text: str, dim: int = 768) -> List[float]:
     """Generate a deterministic normalized 768-dim pseudo-semantic vector from text tokens and n-grams."""
@@ -68,86 +68,67 @@ def generate_local_embedding(text: str, dim: int = 768) -> List[float]:
         vec = [x / norm for x in vec]
     return vec
 
-class GoogleGenAIEmbeddingFunction(chromadb.EmbeddingFunction):
-    def __init__(self):
-        self._client = None
+def cosine_similarity(v1: List[float], v2: List[float]) -> float:
+    """Compute cosine similarity between two float vectors."""
+    if not v1 or not v2 or len(v1) != len(v2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(v1, v2))
+    norm_a = math.sqrt(sum(a * a for a in v1))
+    norm_b = math.sqrt(sum(b * b for b in v2))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
-    def _get_client(self):
+
+class VectorEmbeddingService:
+    def __init__(self):
+        pass
+
+    def _get_api_key(self) -> Optional[str]:
         key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not key:
+            try:
+                row = db.fetchone("SELECT gemini_api_key FROM users WHERE gemini_api_key IS NOT NULL AND gemini_api_key != '' ORDER BY last_login DESC LIMIT 1")
+                if row:
+                    key = row.get("gemini_api_key")
+            except Exception:
+                pass
+        return key
+
+    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        key = self._get_api_key()
         if key:
             try:
-                return Client(api_key=key)
+                from google.genai import Client
+                client = Client(api_key=key)
+                for attempt in range(3):
+                    try:
+                        response = client.models.embed_content(
+                            model="text-embedding-004",
+                            contents=texts
+                        )
+                        return [e.values for e in response.embeddings]
+                    except Exception as e:
+                        err_str = str(e)
+                        logger.warning(f"Embedding API attempt {attempt+1}/3 failed ({err_str[:120]})")
+                        if attempt < 2 and ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str):
+                            time.sleep(1.0 * (attempt + 1))
+                            continue
+                        break
             except Exception as e:
-                logger.warning(f"Could not initialize GenAI Client for embeddings: {e}")
-        return None
+                logger.warning(f"Could not use Google GenAI embedding ({e}). Using normalized vector fallback.")
 
-    def __call__(self, input: chromadb.Documents) -> chromadb.Embeddings:
-        client = self._get_client()
-        if client:
-            # Attempt with exponential backoff for high demand spikes (503 / 429)
-            for attempt in range(3):
-                try:
-                    response = client.models.embed_content(
-                        model="text-embedding-004",
-                        contents=input
-                    )
-                    return [e.values for e in response.embeddings]
-                except Exception as e:
-                    err_str = str(e)
-                    logger.warning(f"GenAI embed_content attempt {attempt + 1}/3 failed ({err_str[:120]})")
-                    if attempt < 2 and ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str):
-                        time.sleep(1.0 * (attempt + 1))
-                        continue
-                    break
+        # Fallback to normalized deterministic vector
+        return [generate_local_embedding(t, 768) for t in texts]
 
-        # Fallback to deterministic normalized local embedding vectors
-        logger.info(f"Using deterministic local embedding fallback for {len(input)} chunks")
-        return [generate_local_embedding(doc, 768) for doc in input]
-
-if os.environ.get("VERCEL"):
-    DB_DIR = "/tmp/.ag_chroma"
-else:
-    DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".ag_chroma")
 
 class RAGManager:
+    """Database-backed RAG Manager storing embeddings and documents in PostgreSQL."""
+
     def __init__(self):
-        os.makedirs(DB_DIR, exist_ok=True)
-        
-        self.chroma_client = chromadb.PersistentClient(path=DB_DIR)
-        self.embedding_function = GoogleGenAIEmbeddingFunction()
-        
-        self.collection = self.chroma_client.get_or_create_collection(
-            name="knowledge_base",
-            embedding_function=self.embedding_function
-        )
-        
-        self.metadata_file = os.path.join(DB_DIR, "documents_metadata.json")
-        self.texts_file = os.path.join(DB_DIR, "document_texts.json")
-        
-        self.documents_metadata = {} # In-memory map of ingested documents
-        self.document_texts = {} # In-memory map of full texts for viewing
-        self._load_persistence()
+        db.initialize()
+        self.embed_service = VectorEmbeddingService()
 
-    def _load_persistence(self):
-        try:
-            if os.path.exists(self.metadata_file):
-                with open(self.metadata_file, "r") as f:
-                    self.documents_metadata = json.load(f)
-            if os.path.exists(self.texts_file):
-                with open(self.texts_file, "r", encoding="utf-8") as f:
-                    self.document_texts = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load RAG persistence: {e}")
-
-    def _save_persistence(self):
-        try:
-            with open(self.metadata_file, "w") as f:
-                json.dump(self.documents_metadata, f)
-            with open(self.texts_file, "w", encoding="utf-8") as f:
-                json.dump(self.document_texts, f)
-        except Exception as e:
-            logger.error(f"Failed to save RAG persistence: {e}")
-        
     def extract_text(self, file_content: bytes, filename: str) -> str:
         """Extract text from supported file types."""
         if filename.endswith(".pdf"):
@@ -159,12 +140,12 @@ class RAGManager:
                     text += extracted + "\n"
             return text
         elif filename.endswith(".txt") or filename.endswith(".md"):
-            return file_content.decode("utf-8")
+            return file_content.decode("utf-8", errors="replace")
         else:
             raise ValueError(f"Unsupported file type: {filename}")
 
-    def ingest_document(self, filename: str, content: bytes = None, raw_text: str = None) -> dict:
-        """Parse, chunk, and embed a document into the RAG store."""
+    def ingest_document(self, filename: str, content: bytes = None, raw_text: str = None, user_id: Optional[str] = None) -> dict:
+        """Parse, chunk, embed, and store document in PostgreSQL database."""
         try:
             text = raw_text if raw_text else self.extract_text(content, filename)
             if not text.strip():
@@ -173,15 +154,24 @@ class RAGManager:
             doc_id = str(uuid.uuid4())
             chunks = recursive_text_split(text)
             
-            # Add to Chroma
-            ids = [str(uuid.uuid4()) for _ in chunks]
-            metadatas = [{"source": filename, "doc_id": doc_id} for _ in chunks]
+            # Generate vector embeddings
+            embeddings = self.embed_service.get_embeddings(chunks)
             
-            self.collection.add(
-                documents=chunks,
-                metadatas=metadatas,
-                ids=ids
+            # Store document record in DB
+            db.execute(
+                """INSERT INTO rag_documents (doc_id, filename, chunks_count, status, full_text, user_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (doc_id, filename, len(chunks), "Indexed", text, user_id)
             )
+            
+            # Store chunk vectors in DB
+            for idx, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+                chunk_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO rag_chunks (chunk_id, doc_id, chunk_index, content, embedding, source)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (chunk_id, doc_id, idx, chunk, json.dumps(emb), filename)
+                )
             
             doc_info = {
                 "id": doc_id,
@@ -189,50 +179,60 @@ class RAGManager:
                 "chunks": len(chunks),
                 "status": "Indexed"
             }
-            self.documents_metadata[doc_id] = doc_info
-            self.document_texts[doc_id] = text
-            self._save_persistence()
-            
             return doc_info
         except Exception as e:
-            logger.error(f"Failed to ingest {filename}: {e}")
+            logger.error(f"Failed to ingest {filename} into database: {e}")
             raise e
 
-    def get_documents(self) -> List[Dict[str, Any]]:
-        return list(self.documents_metadata.values())
+    def get_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if user_id:
+            rows = db.fetchall("SELECT doc_id as id, filename, chunks_count as chunks, status, created_at FROM rag_documents WHERE user_id = ? OR user_id IS NULL ORDER BY created_at DESC", (user_id,))
+        else:
+            rows = db.fetchall("SELECT doc_id as id, filename, chunks_count as chunks, status, created_at FROM rag_documents ORDER BY created_at DESC")
+        return [dict(r) for r in rows]
 
     def get_document_text(self, doc_id: str) -> str:
-        return self.document_texts.get(doc_id, "Text not found.")
+        row = db.fetchone("SELECT full_text FROM rag_documents WHERE doc_id = ?", (doc_id,))
+        if row and row.get("full_text"):
+            return row["full_text"]
+        return "Text not found."
 
-    def delete_document(self, doc_id: str):
-        if doc_id in self.documents_metadata:
-            try:
-                self.collection.delete(where={"doc_id": doc_id})
-            except Exception as e:
-                logger.error(f"Failed to delete vectors for {doc_id}: {e}")
-            
-            del self.documents_metadata[doc_id]
-            if doc_id in self.document_texts:
-                del self.document_texts[doc_id]
-            self._save_persistence()
-            return True
-        return False
+    def delete_document(self, doc_id: str) -> bool:
+        db.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc_id,))
+        db.execute("DELETE FROM rag_documents WHERE doc_id = ?", (doc_id,))
+        return True
 
-    def query(self, query_text: str, k: int = 3) -> str:
-        """Retrieve relevant context for a query."""
-        results = self.collection.query(
-            query_texts=[query_text],
-            n_results=k
-        )
+    def query(self, query_text: str, k: int = 3, user_id: Optional[str] = None) -> str:
+        """Retrieve relevant context for a query using cosine similarity on DB vector embeddings."""
+        query_embs = self.embed_service.get_embeddings([query_text])
+        if not query_embs:
+            return "No relevant information found in the knowledge base."
         
-        if not results or not results['documents'] or not results['documents'][0]:
+        query_vec = query_embs[0]
+        
+        # Retrieve chunks from DB
+        chunks = db.fetchall("SELECT content, embedding, source FROM rag_chunks")
+        if not chunks:
+            return "No relevant information found in the knowledge base."
+        
+        scored_chunks = []
+        for c in chunks:
+            try:
+                emb = json.loads(c["embedding"])
+                score = cosine_similarity(query_vec, emb)
+                scored_chunks.append((score, c["content"], c["source"]))
+            except Exception:
+                continue
+                
+        scored_chunks.sort(key=lambda x: x[0], reverse=True)
+        top_k = scored_chunks[:k]
+        
+        if not top_k:
             return "No relevant information found in the knowledge base."
             
         context_parts = []
-        for i, doc in enumerate(results['documents'][0]):
-            meta = results['metadatas'][0][i] if results['metadatas'] and results['metadatas'][0] else {}
-            source = meta.get('source', 'Unknown')
-            context_parts.append(f"Source: {source}\n{doc}")
+        for score, content, source in top_k:
+            context_parts.append(f"Source: {source} (Relevance: {score:.2f})\n{content}")
             
         return "\n\n---\n\n".join(context_parts)
 

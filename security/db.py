@@ -170,6 +170,28 @@ class Database:
                     previous_hash VARCHAR(128) NOT NULL,
                     event_hash VARCHAR(128) NOT NULL
                 );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS rag_documents (
+                    doc_id VARCHAR(128) PRIMARY KEY,
+                    filename VARCHAR(255) NOT NULL,
+                    chunks_count INTEGER NOT NULL DEFAULT 0,
+                    status VARCHAR(64) DEFAULT 'Indexed',
+                    full_text TEXT,
+                    user_id VARCHAR(128),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS rag_chunks (
+                    chunk_id VARCHAR(128) PRIMARY KEY,
+                    doc_id VARCHAR(128) NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
+                    source VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             ]
             conn = self._pg_pool.getconn()
@@ -266,6 +288,28 @@ class Database:
                     handshake_id TEXT,
                     previous_hash TEXT NOT NULL,
                     event_hash TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS rag_documents (
+                    doc_id TEXT PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    chunks_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT DEFAULT 'Indexed',
+                    full_text TEXT,
+                    user_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS rag_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    doc_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
+                    source TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             ]
