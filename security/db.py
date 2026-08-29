@@ -32,28 +32,69 @@ class Database:
             or os.getenv("POSTGRESQL_URL")
         )
 
+    def _extract_pg_params(self) -> Optional[Dict[str, Any]]:
+        """Extract discrete PostgreSQL connection parameters without URL parsing issues."""
+        import urllib.parse
+        import re
+
+        # Check explicit individual env vars first
+        if os.getenv("PGHOST") or os.getenv("DB_HOST"):
+            return {
+                "host": os.getenv("PGHOST") or os.getenv("DB_HOST"),
+                "port": int(os.getenv("PGPORT") or os.getenv("DB_PORT") or 5432),
+                "user": os.getenv("PGUSER") or os.getenv("DB_USER") or "postgres",
+                "password": os.getenv("PGPASSWORD") or os.getenv("DB_PASSWORD") or "",
+                "dbname": os.getenv("PGDATABASE") or os.getenv("DB_NAME") or "postgres",
+            }
+
+        url = self._get_db_url()
+        if not url:
+            return None
+
+        clean_url = url.strip()
+        if not ("postgres://" in clean_url.lower() or "postgresql://" in clean_url.lower()):
+            return None
+
+        if clean_url.startswith("postgres://"):
+            clean_url = "postgresql://" + clean_url[11:]
+
+        # Robust regex extraction matching from right to left to avoid issues with @ and : in passwords
+        m = re.match(r"^postgresql://(?:([^:]+)(?::(.*))?@)?([^:/]+)(?::(\d+))?(?:/(.+))?$", clean_url)
+        if m:
+            user = urllib.parse.unquote(m.group(1) or "postgres")
+            password = urllib.parse.unquote(m.group(2) or "")
+            host = m.group(3)
+            port = int(m.group(4) or 5432)
+            dbname = m.group(5) or "postgres"
+            if "?" in dbname:
+                dbname = dbname.split("?")[0]
+            return {
+                "host": host,
+                "port": port,
+                "user": user,
+                "password": password,
+                "dbname": dbname
+            }
+        return None
+
     def initialize(self):
         with self._lock:
             if self._initialized:
                 return
 
-            db_url = self._get_db_url()
-            if db_url and ("postgres" in db_url.lower() or "postgresql" in db_url.lower()):
-                # Normalize postgres:// to postgresql://
-                if db_url.startswith("postgres://"):
-                    db_url = "postgresql://" + db_url[11:]
-                
+            conn_params = self._extract_pg_params()
+            if conn_params:
                 try:
                     import psycopg2
                     from psycopg2 import pool
                     from psycopg2.extras import RealDictCursor
 
-                    # Create connection pool
+                    # Create connection pool with discrete parameters (safely handles special characters in passwords)
                     self._pg_pool = pool.ThreadedConnectionPool(
                         minconn=1,
                         maxconn=10,
-                        dsn=db_url,
-                        connect_timeout=10
+                        connect_timeout=10,
+                        **conn_params
                     )
                     # Test a connection
                     conn = self._pg_pool.getconn()
