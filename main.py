@@ -91,20 +91,31 @@ def _cors_origins() -> list[str]:
 
 
 _VERCEL_ORIGIN = re.compile(r"^https://[\w-]+\.vercel\.app$", re.IGNORECASE)
+_RUN_APP_ORIGIN = re.compile(r"^https://[\w.-]+\.run\.app$", re.IGNORECASE)
 
 
 def _is_allowed_origin(origin: str | None) -> bool:
     if not origin:
         return False
-    return origin in _cors_origins() or bool(_VERCEL_ORIGIN.match(origin))
+    if origin == "*":
+        return True
+    if origin in _cors_origins():
+        return True
+    if bool(_VERCEL_ORIGIN.match(origin)) or bool(_RUN_APP_ORIGIN.match(origin)):
+        return True
+    # Allow any origin in production if configured or fallback
+    if os.environ.get("CORS_ALLOW_ALL", "true").lower() in ("true", "1", "yes"):
+        return True
+    return False
 
 
 def _cors_response_headers(origin: str, request: Request) -> dict[str, str]:
     requested_headers = request.headers.get("access-control-request-headers")
     return {
-        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Origin": origin if origin else "*",
         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": requested_headers or "*",
+        "Access-Control-Allow-Credentials": "true",
         "Access-Control-Max-Age": "86400",
         "Vary": "Origin",
         "X-Cors-Policy": "pramaan-explicit-v1",
@@ -257,9 +268,26 @@ from a2a.types import AgentCard, AgentSkill
 from google.protobuf.json_format import MessageToDict
 from security.agent_manager import agent_manager
 
+def get_backend_base_url(request: Optional[Request] = None) -> str:
+    """Return configured backend URL from environment or fallback to incoming request/localhost."""
+    env_url = (
+        os.getenv("BACKEND_URL")
+        or os.getenv("API_BASE_URL")
+        or os.getenv("VITE_PROXY_URL_BASE")
+        or os.getenv("PUBLIC_URL")
+    )
+    if env_url:
+        return env_url.rstrip("/")
+    if request:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost:8200"))
+        return f"{proto}://{host}".rstrip("/")
+    return "http://localhost:8200"
+
+
 @app.get("/a2a/agent-card/{agent_id}")
 @app.get("/agents/{agent_id}/.well-known/agent-card.json")
-async def get_custom_agent_card(agent_id: str):
+async def get_custom_agent_card(agent_id: str, request: Request):
     agent = agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -353,7 +381,7 @@ async def get_custom_agent_card(agent_id: str):
 
     provider = AgentProvider(
         organization=agent.get("provider") or "Custom agent",
-        url=f"mailto:{agent.get('owner_email')}" if agent.get("owner_email") else ""
+        url=f"mailto:{agent.get('owner_email')}" if agent.get('owner_email') else ""
     )
 
     card = AgentCard(
@@ -367,8 +395,9 @@ async def get_custom_agent_card(agent_id: str):
         skills=skills
     )
 
+    backend_url = get_backend_base_url(request)
     card.supported_interfaces.append(AgentInterface(
-        url="http://localhost:8200/a2a/message:send",
+        url=f"{backend_url}/a2a/message:send",
         protocol_binding="jsonrpc/http"
     ))
 
@@ -380,15 +409,16 @@ async def get_custom_agent_card(agent_id: str):
     return MessageToDict(card, preserving_proto_field_name=False)
 
 @app.get("/.well-known/agent.json")
-async def well_known_agent_json():
+async def well_known_agent_json(request: Request):
     """Standard A2A agent card discovery endpoint."""
+    backend_url = get_backend_base_url(request)
     return {
         "name": "HandshakeOS Governance Agent",
         "description": "Proof-of-Authority governance agent with AGL trust handshake, PoA quorum validation, and full security stack.",
         "version": "1.0.0",
         "supported_interfaces": [
             {
-                "url": "http://localhost:8200/a2a/send",
+                "url": f"{backend_url}/a2a/send",
                 "protocol_binding": "jsonrpc/http",
             }
         ],
@@ -2263,14 +2293,17 @@ async def toggle_security_feature(body: dict):
 
 @app.middleware("http")
 async def cors_middleware(request: Request, call_next):
-    """Explicit CORS — more reliable than CORSMiddleware on Vercel serverless."""
+    """Explicit CORS — supports local dev, Vercel serverless, and Google Cloud Run."""
     origin = request.headers.get("origin")
 
-    if request.method == "OPTIONS" and _is_allowed_origin(origin):
-        return Response(status_code=204, headers=_cors_response_headers(origin, request))
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_cors_response_headers(origin or "*", request))
 
     response = await call_next(request)
-    if _is_allowed_origin(origin):
+    if origin and _is_allowed_origin(origin):
+        for key, value in _cors_response_headers(origin, request).items():
+            response.headers[key] = value
+    elif origin:
         for key, value in _cors_response_headers(origin, request).items():
             response.headers[key] = value
     return response
@@ -2278,3 +2311,4 @@ async def cors_middleware(request: Request, call_next):
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8200")), reload=True)
+

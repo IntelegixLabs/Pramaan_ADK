@@ -9,13 +9,22 @@ if os.environ.get("VERCEL"):
 else:
     DB_PATH = os.path.join(os.path.dirname(__file__), "..", "handshakeos.db")
 
+def _get_backend_base() -> str:
+    return (
+        os.getenv("BACKEND_URL")
+        or os.getenv("API_BASE_URL")
+        or os.getenv("VITE_PROXY_URL_BASE")
+        or "http://localhost:8200"
+    ).rstrip("/")
+
+
 DEFAULT_MCPS = [
     {
         "id": "mcp-github-1",
         "name": "GitHub Copilot MCP",
         "description": "Default configuration for GitHub Copilot MCP Server.",
         "server_url": "https://api.githubcopilot.com/mcp/",
-        "proxy_url": "http://localhost:8200/mcp-proxy/mcp-github-1",
+        "proxy_url": f"{_get_backend_base()}/mcp-proxy/mcp-github-1",
         "auth_type": "Bearer",
         "auth_token": "",
         "environment": "Production",
@@ -175,7 +184,7 @@ class MCPManager:
     def create_mcp(self, mcp_data: dict, user_id: Optional[str] = None):
         mcp_id = str(uuid.uuid4())
         # Generate custom proxy URL based on ID
-        proxy_url = f"http://localhost:8200/mcp-proxy/{mcp_id}"
+        proxy_url = f"{_get_backend_base()}/mcp-proxy/{mcp_id}"
 
         self._save_hosted_script(mcp_id, mcp_data)
 

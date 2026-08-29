@@ -250,11 +250,17 @@ class HoneypotCanary:
             return None
 
         # Return a realistic-looking agent card
+        backend_base = (
+            os.getenv("BACKEND_URL")
+            or os.getenv("API_BASE_URL")
+            or os.getenv("VITE_PROXY_URL_BASE")
+            or "http://localhost:8200"
+        ).rstrip("/")
         return {
             "name": canary["name"],
             "description": canary["description"],
             "version": "1.0.0",
-            "url": f"http://localhost:8200/a2a/{agent_id}",
+            "url": f"{backend_base}/a2a/{agent_id}",
             "capabilities": {
                 "streaming": True,
                 "extensions": [{
