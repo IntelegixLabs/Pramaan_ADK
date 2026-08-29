@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Secret key for signing session tokens
 SECRET_KEY = os.getenv("SESSION_SECRET", os.getenv("JWT_SECRET", "pramaan-secure-auth-secret-key-2026"))
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_ID = (os.getenv("GOOGLE_CLIENT_ID") or os.getenv("VITE_GOOGLE_CLIENT_ID", "")).strip()
 
 if os.environ.get("VERCEL"):
     DB_PATH = "/tmp/handshakeos.db"
@@ -251,8 +251,8 @@ class DevAuthRequest(BaseModel):
 async def get_auth_config():
     """Return public auth configuration."""
     return {
-        "google_client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
-        "has_google_client_id": bool(os.getenv("GOOGLE_CLIENT_ID", "").strip()),
+        "google_client_id": GOOGLE_CLIENT_ID,
+        "has_google_client_id": bool(GOOGLE_CLIENT_ID),
     }
 
 
