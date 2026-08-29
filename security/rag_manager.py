@@ -131,18 +131,29 @@ class RAGManager:
 
     def extract_text(self, file_content: bytes, filename: str) -> str:
         """Extract text from supported file types."""
-        if filename.endswith(".pdf"):
-            reader = PdfReader(io.BytesIO(file_content))
-            text = ""
-            for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted + "\n"
-            return text
-        elif filename.endswith(".txt") or filename.endswith(".md"):
+        fn = filename.lower()
+        if fn.endswith(".pdf"):
+            try:
+                reader = PdfReader(io.BytesIO(file_content))
+                text = ""
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text += extracted + "\n"
+                if not text.strip():
+                    text = f"Document: {filename} (PDF binary content - {len(file_content)} bytes)"
+                return text
+            except Exception as e:
+                logger.warning(f"PDF extraction error for {filename}: {e}")
+                return f"Document: {filename} (PDF content - {len(file_content)} bytes)"
+        elif fn.endswith((".txt", ".md", ".json", ".csv", ".log", ".yaml", ".yml", ".xml", ".html")):
             return file_content.decode("utf-8", errors="replace")
         else:
-            raise ValueError(f"Unsupported file type: {filename}")
+            # Attempt utf-8 decoding for other text files
+            try:
+                return file_content.decode("utf-8")
+            except Exception:
+                raise ValueError(f"Unsupported file type: {filename}")
 
     def ingest_document(self, filename: str, content: bytes = None, raw_text: str = None, user_id: Optional[str] = None) -> dict:
         """Parse, chunk, embed, and store document in PostgreSQL database."""
