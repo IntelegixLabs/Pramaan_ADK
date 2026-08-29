@@ -43,24 +43,33 @@ class MCPManager:
     def __init__(self, db_path=None):
         db.initialize()
 
+    def _format_mcp_record(self, r: dict) -> dict:
+        mcp = dict(r)
+        mcp['tools'] = json.loads(mcp['tools']) if mcp.get('tools') else []
+        mcp['resources'] = json.loads(mcp['resources']) if mcp.get('resources') else []
+        mcp['prompts'] = json.loads(mcp['prompts']) if mcp.get('prompts') else []
+        mcp['allowed_tools'] = mcp['tools']
+        mcp['allowed_resources'] = mcp['resources']
+        mcp['allowed_prompts'] = mcp['prompts']
+        mcp['hosted_tools'] = mcp.get('hosted_tools') or mcp['tools']
+        mcp['hosted_resources'] = mcp.get('hosted_resources') or mcp['resources']
+        mcp['hosted_prompts'] = mcp.get('hosted_prompts') or mcp['prompts']
+        mcp['is_default'] = False
+        mcp['status'] = mcp.get('status') or 'ACTIVE'
+        mcp['auth_type'] = mcp.get('auth_type') or 'None'
+        mcp['environment'] = mcp.get('environment') or 'Production'
+        mcp['risk_tier'] = mcp.get('risk_tier') or 'LOW'
+        mcp['proxy_url'] = f"{_get_backend_base()}/mcp-proxy/{mcp['id']}"
+        mcp['is_hosted'] = mcp.get('transport') == 'python' or bool(mcp.get('tools') and any(isinstance(t, dict) and t.get('code') for t in mcp['tools']))
+        return mcp
+
     def get_all_mcps(self, user_id: Optional[str] = None):
         if user_id:
             rows = db.fetchall('SELECT * FROM custom_mcps WHERE user_id = ? OR user_id IS NULL', (user_id,))
         else:
             rows = db.fetchall('SELECT * FROM custom_mcps')
             
-        mcps = []
-        for r in rows:
-            mcp = dict(r)
-            mcp['tools'] = json.loads(mcp['tools']) if mcp.get('tools') else []
-            mcp['resources'] = json.loads(mcp['resources']) if mcp.get('resources') else []
-            mcp['prompts'] = json.loads(mcp['prompts']) if mcp.get('prompts') else []
-            mcp['allowed_tools'] = mcp['tools']
-            mcp['allowed_resources'] = mcp['resources']
-            mcp['allowed_prompts'] = mcp['prompts']
-            mcp['is_default'] = False
-            mcps.append(mcp)
-
+        mcps = [self._format_mcp_record(r) for r in rows]
         return DEFAULT_MCPS + mcps
 
     def get_mcp(self, mcp_id: str, user_id: Optional[str] = None):
@@ -76,15 +85,7 @@ class MCPManager:
         if not row:
             return None
             
-        mcp = dict(row)
-        mcp['tools'] = json.loads(mcp['tools']) if mcp.get('tools') else []
-        mcp['resources'] = json.loads(mcp['resources']) if mcp.get('resources') else []
-        mcp['prompts'] = json.loads(mcp['prompts']) if mcp.get('prompts') else []
-        mcp['allowed_tools'] = mcp['tools']
-        mcp['allowed_resources'] = mcp['resources']
-        mcp['allowed_prompts'] = mcp['prompts']
-        mcp['is_default'] = False
-        return mcp
+        return self._format_mcp_record(row)
 
     def create_mcp(self, mcp_data: dict, user_id: Optional[str] = None):
         mcp_id = str(uuid.uuid4())
