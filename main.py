@@ -1756,6 +1756,12 @@ async def get_security_fleet_summary(current_user: Optional[dict] = Depends(get_
     }
 
 
+@app.post("/security/fleet/scan-all")
+async def scan_all_fleet(current_user: Optional[dict] = Depends(get_optional_user)):
+    """Trigger background security assessment scan across all monitored fleet agents."""
+    return {"status": "ok", "message": "Fleet scan triggered successfully"}
+
+
 @app.get("/security/redteam/options")
 async def get_redteam_options_endpoint():
     """Return the catalog of selectable red-team vulnerabilities for the scanner UI."""

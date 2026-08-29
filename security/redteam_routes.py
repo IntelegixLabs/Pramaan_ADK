@@ -258,6 +258,12 @@ async def run_red_team_agent(body: dict, current_user: Optional[dict] = Depends(
     return {"report": report}
 
 
+@router.post("/red-team/run")
+async def run_red_team_fleet(body: Optional[dict] = None, current_user: Optional[dict] = Depends(get_optional_user)):
+    """Run red team simulation for fleet or specified agent."""
+    return await run_red_team_agent(body or {}, current_user=current_user)
+
+
 @router.get("/red-team/agent/{agent_id}")
 async def get_agent_red_team_report(agent_id: str):
     """Retrieve the latest PyRIT red team report for an agent."""
