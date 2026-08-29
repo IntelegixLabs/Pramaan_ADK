@@ -162,8 +162,12 @@ async def get_custom_agents(current_user: Optional[Dict[str, Any]] = Depends(get
 
 # --- RAG Knowledge Base ---
 @router.post("/rag/upload")
-async def upload_document(file: UploadFile = File(...), skip_security: bool = Form(False),
-                          mask_pii: bool = Form(False)):
+async def upload_document(
+    file: UploadFile = File(...),
+    skip_security: bool = Form(False),
+    mask_pii: bool = Form(False),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)
+):
     content = await file.read()
 
     # 1. Extract text for scanning
@@ -180,7 +184,7 @@ async def upload_document(file: UploadFile = File(...), skip_security: bool = Fo
     # 2. Agentic Security Scan
     scan_result = {"is_safe": True, "reason": "Security scan bypassed."}
     if not skip_security:
-        scan_result = scan_document(file.filename, text_preview)
+        scan_result = scan_document(file.filename, text_preview, user=current_user)
         if not scan_result.get("is_safe", False):
             raise HTTPException(status_code=403,
                                 detail=f"Agentic Security Rejected Document: {scan_result.get('reason')}")
@@ -194,7 +198,7 @@ async def upload_document(file: UploadFile = File(...), skip_security: bool = Fo
 
 
 @router.get("/rag/documents")
-async def get_documents():
+async def get_documents(current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
     return rag_manager.get_documents()
 
 

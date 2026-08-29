@@ -260,6 +260,9 @@ app.include_router(admin_routes.router)
 from security.mcp_proxy import router as mcp_proxy_router
 app.include_router(mcp_proxy_router)
 app.include_router(auth_router)
+from security.redteam_routes import router as redteam_router
+app.include_router(redteam_router)
+
 
 
 # ─── Demo / Convenience Endpoints ───

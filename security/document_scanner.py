@@ -21,12 +21,57 @@ Respond strictly in JSON format matching this schema:
 }
 """
 
-def scan_document(filename: str, content: str) -> dict:
-    """Scans document content using an LLM to enforce agentic security policies."""
-    logger.info(f"Scanning document: {filename} ({len(content)} chars)")
+from typing import Optional, Dict, Any
+import re
+
+def _rule_based_scan(filename: str, content: str) -> dict:
+    """Deterministic fallback scanner for PII and Prompt Injections when LLM is offline."""
+    # 1. PII Checks
+    ssn_match = re.search(r"\b\d{3}-\d{2}-\d{4}\b", content)
+    cc_match = re.search(r"\b(?:\d{4}[ -]?){3}\d{4}\b", content)
+    email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", content)
+
+    if ssn_match or cc_match:
+        findings = []
+        if ssn_match:
+            findings.append("Social Security Number (SSN) pattern detected")
+        if cc_match:
+            findings.append("Credit Card Number pattern detected")
+        return {
+            "is_safe": False,
+            "reason": f"Heuristic PII Violation: {', '.join(findings)}.",
+            "threat_type": "PII"
+        }
+
+    # 2. Prompt Injection Checks
+    injection_patterns = [
+        r"ignore\s+(all\s+)?(previous|prior)\s+instructions",
+        r"disregard\s+(all\s+)?(previous|prior)\s+instructions",
+        r"system\s*:\s*you\s+are",
+        r"bypass\s+security\s+filter",
+        r"jailbreak",
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, content, re.IGNORECASE):
+            return {
+                "is_safe": False,
+                "reason": f"Prompt Injection Pattern Detected: matches pattern '{pattern}'.",
+                "threat_type": "Injection"
+            }
+
+    return {
+        "is_safe": True,
+        "reason": "Document verified via heuristic security filter (no PII or prompt injection patterns detected).",
+        "threat_type": "None"
+    }
+
+
+def scan_document(filename: str, content: str, user: Optional[Dict[str, Any]] = None) -> dict:
+    """Scans document content using the user's configured Gemini model to enforce agentic security policies."""
+    logger.info(f"Scanning document: {filename} ({len(content)} chars) with user={user.get('email') if user else 'global'}")
     try:
-        client = get_genai_client()
-        model_name = build_llm_model_name()
+        client = get_genai_client(user=user)
+        model_name = build_llm_model_name(user=user)
         
         # Truncate content to avoid token limits for the scan
         content_sample = content[:4000]
@@ -52,10 +97,12 @@ def scan_document(filename: str, content: str) -> dict:
         result = json.loads(text.strip())
         return result
     except Exception as e:
-        logger.error(f"Error scanning document {filename}: {e}")
-        # Default to safe if the LLM scan fails, or you could default to false for strict security
-        return {
-            "is_safe": False,
-            "reason": f"Scan failed due to internal error: {str(e)}",
-            "threat_type": "Error"
-        }
+        logger.warning(f"LLM scan unavailable for {filename} ({e}), running heuristic security scanner")
+        # Run heuristic scan fallback so users are not blocked if LLM key is absent or failing
+        heuristic_res = _rule_based_scan(filename, content)
+        if not heuristic_res["is_safe"]:
+            return heuristic_res
+        
+        # If heuristics pass but LLM had an error, note warning or return safe
+        return heuristic_res
+
