@@ -52,10 +52,19 @@ class UserManager:
                     name TEXT NOT NULL,
                     picture TEXT,
                     provider TEXT DEFAULT 'google',
+                    gemini_api_key TEXT,
+                    gemini_model TEXT DEFAULT 'gemini-2.5-flash',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            # Check existing columns for migrations
+            cursor.execute("PRAGMA table_info(users)")
+            existing_cols = [c[1] for c in cursor.fetchall()]
+            if 'gemini_api_key' not in existing_cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT")
+            if 'gemini_model' not in existing_cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN gemini_model TEXT DEFAULT 'gemini-2.5-flash'")
             conn.commit()
 
     def get_or_create_user(self, email: str, name: str, picture: Optional[str] = None, provider: str = "google", user_id: Optional[str] = None) -> Dict[str, Any]:
@@ -99,6 +108,27 @@ class UserManager:
             cursor.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def update_user_llm_config(self, user_id: str, api_key: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if api_key is not None and model is not None:
+                cursor.execute(
+                    "UPDATE users SET gemini_api_key = ?, gemini_model = ? WHERE user_id = ?",
+                    (api_key.strip() if api_key else None, model.strip(), user_id)
+                )
+            elif api_key is not None:
+                cursor.execute(
+                    "UPDATE users SET gemini_api_key = ? WHERE user_id = ?",
+                    (api_key.strip() if api_key else None, user_id)
+                )
+            elif model is not None:
+                cursor.execute(
+                    "UPDATE users SET gemini_model = ? WHERE user_id = ?",
+                    (model.strip(), user_id)
+                )
+            conn.commit()
+        return self.get_user_by_id(user_id) or {}
 
 
 user_manager = UserManager()
@@ -307,3 +337,124 @@ async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
     return {
         "user": current_user
     }
+
+
+class SaveLLMConfigRequest(BaseModel):
+    api_key: Optional[str] = None
+    model: Optional[str] = "gemini-2.5-flash"
+
+
+AVAILABLE_GEMINI_MODELS = [
+    # Gemini 3 Series
+    {"id": "gemini-3.7-flash", "name": "Gemini 3.7 Flash", "series": "Gemini 3", "tag": "Latest Frontier", "desc": "Most capable Flash model, built for complex coding and agentic workflows"},
+    {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash", "series": "Gemini 3", "tag": "High Agentic", "desc": "Balanced speed and multimodal capabilities across agentic workflows"},
+    {"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash", "series": "Gemini 3", "tag": "High Throughput", "desc": "Foundational performance for routine high-throughput workloads"},
+    {"id": "gemini-3.5-flash-lite", "name": "Gemini 3.5 Flash-Lite", "series": "Gemini 3", "tag": "Ultra Fast", "desc": "Fastest, most cost-effective 3.5 model for high-throughput execution"},
+    {"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro", "series": "Gemini 3", "tag": "Deep Intelligence", "desc": "Advanced intelligence and complex zero-trust threat modeling"},
+    {"id": "gemini-3.1-flash-lite", "name": "Gemini 3.1 Flash-Lite", "series": "Gemini 3", "tag": "Cost Effective", "desc": "Frontier-class performance rivaling larger models"},
+    {"id": "gemini-3-flash", "name": "Gemini 3 Flash", "series": "Gemini 3", "tag": "Frontier Flash", "desc": "Frontier-class speed at a fraction of latency"},
+
+    # Gemini 2.5 & 2.0 Series
+    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "series": "Gemini 2.5", "tag": "Recommended", "desc": "Fast response & high throughput for live multi-agent scanning"},
+    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "series": "Gemini 2.5", "tag": "Deep Reasoning", "desc": "Advanced reasoning and complex zero-trust policy generation"},
+    {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "series": "Gemini 2.0", "tag": "Low Latency", "desc": "Next-gen low latency and high multimodal performance"},
+    {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro", "series": "Gemini 1.5", "tag": "Long Context", "desc": "Extended context window for deep repository & audit inspection"},
+    {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash", "series": "Gemini 1.5", "tag": "Lightweight", "desc": "Lightweight baseline for fast verification tasks"},
+]
+
+
+@auth_router.get("/llm-config")
+async def get_user_llm_config(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Fetch user's saved Gemini LLM configuration."""
+    user = user_manager.get_user_by_id(current_user["user_id"]) or current_user
+    api_key = user.get("gemini_api_key") or ""
+    model = user.get("gemini_model") or "gemini-2.5-flash"
+    has_key = bool(api_key.strip())
+    masked_key = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) >= 10 else ("****" if has_key else "")
+
+    return {
+        "mode": "live" if has_key else "mock",
+        "provider": "google",
+        "model": model,
+        "has_key": has_key,
+        "masked_key": masked_key,
+        "detail": f"Google Gemini ({model}) — live LLM active" if has_key else "No user Gemini API key saved. Please add your key to activate live LLM.",
+        "available_models": AVAILABLE_GEMINI_MODELS,
+    }
+
+
+@auth_router.post("/llm-config")
+async def save_user_llm_config(body: SaveLLMConfigRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Save user's Gemini API key and model selection."""
+    api_key = (body.api_key or "").strip()
+    model = (body.model or "gemini-2.5-flash").strip()
+
+    # If user provided a new key, perform lightweight validation
+    if api_key:
+        # Basic format check
+        if len(api_key) < 10:
+            raise HTTPException(status_code=400, detail="API key is too short. Please provide a valid Gemini API key.")
+        try:
+            from google.genai import Client
+            test_client = Client(api_key=api_key)
+            # Try a safe verification call with standard model
+            try:
+                _ = test_client.models.get(model="gemini-2.5-flash")
+            except Exception as inner_e:
+                err_str = str(inner_e).upper()
+                if "API_KEY_INVALID" in err_str or "INVALID_ARGUMENT" in err_str and "KEY" in err_str:
+                    raise HTTPException(status_code=400, detail="Invalid Gemini API key. Please check your key from Google AI Studio.")
+                logger.info("Non-blocking model check notice: %s", inner_e)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Gemini Client init warning: %s", e)
+            err_str = str(e).upper()
+            if "API_KEY_INVALID" in err_str:
+                raise HTTPException(status_code=400, detail="Invalid Gemini API key. Please verify your key from Google AI Studio.")
+
+    updated_user = user_manager.update_user_llm_config(
+        user_id=current_user["user_id"],
+        api_key=api_key if api_key else None,
+        model=model
+    )
+
+    saved_key = updated_user.get("gemini_api_key") or ""
+    has_key = bool(saved_key.strip())
+    masked_key = f"{saved_key[:6]}...{saved_key[-4:]}" if len(saved_key) >= 10 else ("****" if has_key else "")
+
+    return {
+        "success": True,
+        "message": "Gemini LLM configuration saved successfully",
+        "config": {
+            "mode": "live" if has_key else "mock",
+            "provider": "google",
+            "model": updated_user.get("gemini_model") or model,
+            "has_key": has_key,
+            "masked_key": masked_key,
+            "detail": f"Google Gemini ({model}) — live LLM active" if has_key else "Mock mode",
+        }
+    }
+
+
+@auth_router.delete("/llm-config")
+async def delete_user_llm_config(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Remove user's saved Gemini API key."""
+    updated_user = user_manager.update_user_llm_config(
+        user_id=current_user["user_id"],
+        api_key="",
+        model=current_user.get("gemini_model") or "gemini-2.5-flash"
+    )
+    return {
+        "success": True,
+        "message": "Gemini API key removed",
+        "config": {
+            "mode": "mock",
+            "provider": "google",
+            "model": updated_user.get("gemini_model") or "gemini-2.5-flash",
+            "has_key": False,
+            "masked_key": "",
+            "detail": "No API key configured.",
+        }
+    }
+

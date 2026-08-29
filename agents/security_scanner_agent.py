@@ -173,8 +173,13 @@ class SecurityScannerAgent:
         from deepeval.models import GeminiModel
         sim_model_name = (config.get("simulator_model") or os.getenv("DEEPTEAM_SIMULATOR_MODEL", "gemini-2.5-flash")).replace("gemini/", "")
         eval_model_name = (config.get("evaluation_model") or os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gemini-2.5-flash")).replace("gemini/", "")
-        simulator_model = GeminiModel(model=sim_model_name)
-        evaluation_model = GeminiModel(model=eval_model_name)
+        user_key = config.get("api_key")
+        if user_key:
+            simulator_model = GeminiModel(model=sim_model_name, api_key=user_key)
+            evaluation_model = GeminiModel(model=eval_model_name, api_key=user_key)
+        else:
+            simulator_model = GeminiModel(model=sim_model_name)
+            evaluation_model = GeminiModel(model=eval_model_name)
 
         import sys
         import io
