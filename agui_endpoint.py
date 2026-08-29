@@ -9,9 +9,10 @@ import json
 import time
 from datetime import datetime, timezone
 import os
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, Dict, Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
+from security.auth import get_optional_user
 from fastapi.responses import StreamingResponse
 from ag_ui.core import (
     EventType,
@@ -842,7 +843,7 @@ async def get_audit_logs(
     return {"items": events, "total": total}
 
 @router.get("/status")
-async def agui_status():
+async def agui_status(current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
     """Return system status for the AG-UI dashboard."""
     from main import (
         revocation_cache, circuit_breaker, delegation_ledger,
@@ -850,7 +851,7 @@ async def agui_status():
     )
     from llm_factory import get_llm_info
 
-    llm_info = get_llm_info()
+    llm_info = get_llm_info(user=current_user)
 
     return {
         "llm": {
@@ -858,6 +859,7 @@ async def agui_status():
             "provider": llm_info.provider,
             "model": llm_info.model,
             "detail": llm_info.detail,
+            "has_key": llm_info.has_key,
         },
         "agents": [
             {

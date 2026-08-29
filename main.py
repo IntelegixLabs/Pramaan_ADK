@@ -1692,10 +1692,15 @@ async def scan_agent(body: dict, current_user: Optional[dict] = Depends(get_opti
     # 1. Run the base static vulnerability analysis
     base_report = _analyze_agent_card(card, used_url, fetch_time_ms)
 
-    # 2. Run the dynamic Red Team Agent (Pramaan Sentinel)
     from agents.security_scanner_agent import SecurityScannerAgent
     scanner = SecurityScannerAgent()
     redteam_config = body.get("redteam") or {}
+    if current_user:
+        if current_user.get("gemini_api_key"):
+            redteam_config["api_key"] = current_user["gemini_api_key"]
+        if current_user.get("gemini_model"):
+            redteam_config["simulator_model"] = current_user["gemini_model"]
+            redteam_config["evaluation_model"] = current_user["gemini_model"]
     report = await scanner.scan(used_url, card, base_report, config=redteam_config)
 
     report["raw_card"] = card  # Include raw card for reference
