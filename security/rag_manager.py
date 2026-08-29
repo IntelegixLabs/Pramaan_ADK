@@ -44,22 +44,65 @@ def recursive_text_split(text: str, chunk_size: int = 1000, chunk_overlap: int =
             
     return chunks
 
+import hashlib
+import math
+import time
+
+def generate_local_embedding(text: str, dim: int = 768) -> List[float]:
+    """Generate a deterministic normalized 768-dim pseudo-semantic vector from text tokens and n-grams."""
+    vec = [0.0] * dim
+    words = text.lower().split()
+    if not words:
+        return [0.0] * dim
+    for word in words:
+        h = int(hashlib.sha256(word.encode("utf-8")).hexdigest(), 16)
+        idx = h % dim
+        vec[idx] += 1.0
+    for i in range(len(text) - 3):
+        ngram = text[i:i+3]
+        h = int(hashlib.md5(ngram.encode("utf-8")).hexdigest(), 16)
+        idx = h % dim
+        vec[idx] += 0.5
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm > 0:
+        vec = [x / norm for x in vec]
+    return vec
+
 class GoogleGenAIEmbeddingFunction(chromadb.EmbeddingFunction):
     def __init__(self):
-        self.client = None
-        if os.getenv("GOOGLE_API_KEY"):
-            self.client = Client()
-            
+        self._client = None
+
+    def _get_client(self):
+        key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if key:
+            try:
+                return Client(api_key=key)
+            except Exception as e:
+                logger.warning(f"Could not initialize GenAI Client for embeddings: {e}")
+        return None
+
     def __call__(self, input: chromadb.Documents) -> chromadb.Embeddings:
-        if not self.client:
-            # Fake embeddings for completely offline demo without dependencies
-            return [[0.1] * 768 for _ in input]
-            
-        response = self.client.models.embed_content(
-            model="text-embedding-004",
-            contents=input
-        )
-        return [e.values for e in response.embeddings]
+        client = self._get_client()
+        if client:
+            # Attempt with exponential backoff for high demand spikes (503 / 429)
+            for attempt in range(3):
+                try:
+                    response = client.models.embed_content(
+                        model="text-embedding-004",
+                        contents=input
+                    )
+                    return [e.values for e in response.embeddings]
+                except Exception as e:
+                    err_str = str(e)
+                    logger.warning(f"GenAI embed_content attempt {attempt + 1}/3 failed ({err_str[:120]})")
+                    if attempt < 2 and ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str):
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    break
+
+        # Fallback to deterministic normalized local embedding vectors
+        logger.info(f"Using deterministic local embedding fallback for {len(input)} chunks")
+        return [generate_local_embedding(doc, 768) for doc in input]
 
 if os.environ.get("VERCEL"):
     DB_DIR = "/tmp/.ag_chroma"

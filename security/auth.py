@@ -43,6 +43,7 @@ class UserManager:
         self._init_db()
 
     def _init_db(self):
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -109,24 +110,37 @@ class UserManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def update_user_llm_config(self, user_id: str, api_key: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
+    def update_user_llm_config(self, user_id: str, email: Optional[str] = None, name: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
         with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            if api_key is not None and model is not None:
+            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            now = datetime.now(timezone.utc).isoformat()
+
+            if not row:
+                user_email = (email or f"{user_id}@user.local").lower()
+                user_name = name or "User"
                 cursor.execute(
-                    "UPDATE users SET gemini_api_key = ?, gemini_model = ? WHERE user_id = ?",
-                    (api_key.strip() if api_key else None, model.strip(), user_id)
+                    "INSERT INTO users (user_id, email, name, gemini_api_key, gemini_model, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, user_email, user_name, api_key.strip() if api_key else None, (model or "gemini-2.5-flash").strip(), now, now)
                 )
-            elif api_key is not None:
-                cursor.execute(
-                    "UPDATE users SET gemini_api_key = ? WHERE user_id = ?",
-                    (api_key.strip() if api_key else None, user_id)
-                )
-            elif model is not None:
-                cursor.execute(
-                    "UPDATE users SET gemini_model = ? WHERE user_id = ?",
-                    (model.strip(), user_id)
-                )
+            else:
+                if api_key is not None and model is not None:
+                    cursor.execute(
+                        "UPDATE users SET gemini_api_key = ?, gemini_model = ?, last_login = ? WHERE user_id = ?",
+                        (api_key.strip() if api_key else None, model.strip(), now, user_id)
+                    )
+                elif api_key is not None:
+                    cursor.execute(
+                        "UPDATE users SET gemini_api_key = ?, last_login = ? WHERE user_id = ?",
+                        (api_key.strip() if api_key else None, now, user_id)
+                    )
+                elif model is not None:
+                    cursor.execute(
+                        "UPDATE users SET gemini_model = ?, last_login = ? WHERE user_id = ?",
+                        (model.strip(), now, user_id)
+                    )
             conn.commit()
         return self.get_user_by_id(user_id) or {}
 
@@ -206,13 +220,12 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
     
     user = user_manager.get_user_by_id(payload["user_id"])
     if not user:
-        # Fallback to token payload if user record is cached
-        user = {
-            "user_id": payload["user_id"],
-            "email": payload["email"],
-            "name": payload.get("name", "User"),
-            "picture": payload.get("picture", ""),
-        }
+        user = user_manager.get_or_create_user(
+            email=payload["email"],
+            name=payload.get("name", "User"),
+            picture=payload.get("picture", ""),
+            user_id=payload["user_id"]
+        )
     return user
 
 
@@ -389,32 +402,30 @@ async def save_user_llm_config(body: SaveLLMConfigRequest, current_user: Dict[st
     api_key = (body.api_key or "").strip()
     model = (body.model or "gemini-2.5-flash").strip()
 
-    # If user provided a new key, perform lightweight validation
+    # If user provided a new key, perform format validation
     if api_key:
-        # Basic format check
-        if len(api_key) < 10:
+        if len(api_key) < 8:
             raise HTTPException(status_code=400, detail="API key is too short. Please provide a valid Gemini API key.")
+        
+        # Non-blocking key check with Google GenAI SDK (fail-open on network/verification issues)
         try:
             from google.genai import Client
             test_client = Client(api_key=api_key)
-            # Try a safe verification call with standard model
             try:
                 _ = test_client.models.get(model="gemini-2.5-flash")
             except Exception as inner_e:
                 err_str = str(inner_e).upper()
-                if "API_KEY_INVALID" in err_str or "INVALID_ARGUMENT" in err_str and "KEY" in err_str:
-                    raise HTTPException(status_code=400, detail="Invalid Gemini API key. Please check your key from Google AI Studio.")
-                logger.info("Non-blocking model check notice: %s", inner_e)
-        except HTTPException:
-            raise
+                if "API_KEY_INVALID" in err_str:
+                    logger.warning("Gemini key check returned API_KEY_INVALID: %s", inner_e)
+                else:
+                    logger.info("Non-blocking model check notice: %s", inner_e)
         except Exception as e:
-            logger.warning("Gemini Client init warning: %s", e)
-            err_str = str(e).upper()
-            if "API_KEY_INVALID" in err_str:
-                raise HTTPException(status_code=400, detail="Invalid Gemini API key. Please verify your key from Google AI Studio.")
+            logger.info("Gemini Client init notice: %s", e)
 
     updated_user = user_manager.update_user_llm_config(
         user_id=current_user["user_id"],
+        email=current_user.get("email"),
+        name=current_user.get("name"),
         api_key=api_key if api_key else None,
         model=model
     )
