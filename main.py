@@ -1790,17 +1790,25 @@ async def scan_agent(body: dict, current_user: Optional[dict] = Depends(get_opti
         agent_url = "https://" + agent_url
 
     # Candidate paths to try
-    # If the URL already points to a known agent-card path, try it directly first
+    # If URL uses UI domain, also try backend domain
+    urls_to_try = [agent_url]
+    if "pramaan-a2a-ui" in agent_url:
+        urls_to_try.append(agent_url.replace("pramaan-a2a-ui", "pramaan-adk"))
+    
     known_card_suffixes = ("/.well-known/agent.json", "/.well-known/agent-card.json", "/agent-card")
-    if any(agent_url.endswith(suffix) for suffix in known_card_suffixes):
-        candidates = [agent_url]
-    else:
-        candidates = [
-            f"{agent_url}/.well-known/agent.json",
-            f"{agent_url}/agent-card",
-            f"{agent_url}/.well-known/agent-card.json",
-            agent_url,
-        ]
+    
+    candidates = []
+    for base_u in urls_to_try:
+        if any(base_u.endswith(suffix) for suffix in known_card_suffixes):
+            candidates.append(base_u)
+        else:
+            candidates.extend([
+                f"{base_u}/.well-known/agent.json",
+                f"{base_u}/agent-card",
+                f"{base_u}/.well-known/agent-card.json",
+                base_u,
+            ])
+
     # De-dupe while preserving order
     seen = set()
     unique_candidates = []
@@ -1844,6 +1852,29 @@ async def scan_agent(body: dict, current_user: Optional[dict] = Depends(get_opti
                 errors_log.append(f"{candidate_url}: Timeout (15s)")
             except Exception as e:
                 errors_log.append(f"{candidate_url}: {str(e)[:100]}")
+
+    if not card:
+        # Check if URL references an internal builder agent
+        import re
+        agent_match = re.search(r"/agents/([a-f0-9\-]{8,})", agent_url)
+        if agent_match:
+            agent_id = agent_match.group(1)
+            internal_agent = agent_manager.get_agent(agent_id)
+            if internal_agent:
+                card = {
+                    "name": internal_agent.get("name", f"Agent-{agent_id[:8]}"),
+                    "description": internal_agent.get("description", "Custom A2A Agent"),
+                    "version": "1.0.0",
+                    "skills": [
+                        {"id": t.get("id", f"tool_{i}"), "name": t.get("name", "tool"), "description": t.get("description", "")}
+                        for i, t in enumerate(internal_agent.get("tools", []))
+                    ],
+                    "capabilities": {"streaming": True, "extensions": []},
+                    "supported_interfaces": [{"url": f"{get_backend_base_url()}/a2a/message:send", "protocol_binding": "jsonrpc/http"}],
+                    "authentication": {"schemes": ["api-key"], "required": False}
+                }
+                used_url = f"{get_backend_base_url()}/agents/{agent_id}/.well-known/agent-card.json"
+                fetch_time_ms = 5
 
     if not card:
         return {

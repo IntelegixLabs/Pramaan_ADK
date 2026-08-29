@@ -37,111 +37,63 @@ else:
 # User Database Manager
 # ──────────────────────────────────────────────────────────
 
-class UserManager:
-    def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
-        self._init_db()
+from security.db import db
 
-    def _init_db(self):
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    email TEXT UNIQUE NOT NULL,
-                    name TEXT NOT NULL,
-                    picture TEXT,
-                    provider TEXT DEFAULT 'google',
-                    gemini_api_key TEXT,
-                    gemini_model TEXT DEFAULT 'gemini-2.5-flash',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            # Check existing columns for migrations
-            cursor.execute("PRAGMA table_info(users)")
-            existing_cols = [c[1] for c in cursor.fetchall()]
-            if 'gemini_api_key' not in existing_cols:
-                cursor.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT")
-            if 'gemini_model' not in existing_cols:
-                cursor.execute("ALTER TABLE users ADD COLUMN gemini_model TEXT DEFAULT 'gemini-2.5-flash'")
-            conn.commit()
+class UserManager:
+    def __init__(self, db_path: str = None):
+        db.initialize()
 
     def get_or_create_user(self, email: str, name: str, picture: Optional[str] = None, provider: str = "google", user_id: Optional[str] = None) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
-            row = cursor.fetchone()
-            now = datetime.now(timezone.utc).isoformat()
+        row = db.fetchone("SELECT * FROM users WHERE email = ?", (email.lower(),))
+        now = datetime.now(timezone.utc).isoformat()
 
-            if row:
-                cursor.execute(
-                    "UPDATE users SET name = ?, picture = COALESCE(?, picture), last_login = ? WHERE email = ?",
-                    (name, picture, now, email.lower())
-                )
-                conn.commit()
-                cursor.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
-                return dict(cursor.fetchone())
-            else:
-                uid = user_id or f"usr_{uuid.uuid4().hex[:12]}"
-                cursor.execute(
-                    "INSERT INTO users (user_id, email, name, picture, provider, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (uid, email.lower(), name, picture or "", provider, now, now)
-                )
-                conn.commit()
-                cursor.execute("SELECT * FROM users WHERE user_id = ?", (uid,))
-                return dict(cursor.fetchone())
+        if row:
+            db.execute(
+                "UPDATE users SET name = ?, picture = COALESCE(?, picture), last_login = ? WHERE email = ?",
+                (name, picture, now, email.lower())
+            )
+            return db.fetchone("SELECT * FROM users WHERE email = ?", (email.lower(),)) or {}
+        else:
+            uid = user_id or f"usr_{uuid.uuid4().hex[:12]}"
+            db.execute(
+                "INSERT INTO users (user_id, email, name, picture, provider, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (uid, email.lower(), name, picture or "", provider, now, now)
+            )
+            return db.fetchone("SELECT * FROM users WHERE user_id = ?", (uid,)) or {}
 
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
+        return db.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
-            row = cursor.fetchone()
-            return dict(row) if row else None
+        return db.fetchone("SELECT * FROM users WHERE email = ?", (email.lower(),))
 
     def update_user_llm_config(self, user_id: str, email: Optional[str] = None, name: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-            now = datetime.now(timezone.utc).isoformat()
+        row = db.fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        now = datetime.now(timezone.utc).isoformat()
 
-            if not row:
-                user_email = (email or f"{user_id}@user.local").lower()
-                user_name = name or "User"
-                cursor.execute(
-                    "INSERT INTO users (user_id, email, name, gemini_api_key, gemini_model, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (user_id, user_email, user_name, api_key.strip() if api_key else None, (model or "gemini-2.5-flash").strip(), now, now)
+        if not row:
+            user_email = (email or f"{user_id}@user.local").lower()
+            user_name = name or "User"
+            db.execute(
+                "INSERT INTO users (user_id, email, name, gemini_api_key, gemini_model, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, user_email, user_name, api_key.strip() if api_key else None, (model or "gemini-2.5-flash").strip(), now, now)
+            )
+        else:
+            if api_key is not None and model is not None:
+                db.execute(
+                    "UPDATE users SET gemini_api_key = ?, gemini_model = ?, last_login = ? WHERE user_id = ?",
+                    (api_key.strip() if api_key else None, model.strip(), now, user_id)
                 )
-            else:
-                if api_key is not None and model is not None:
-                    cursor.execute(
-                        "UPDATE users SET gemini_api_key = ?, gemini_model = ?, last_login = ? WHERE user_id = ?",
-                        (api_key.strip() if api_key else None, model.strip(), now, user_id)
-                    )
-                elif api_key is not None:
-                    cursor.execute(
-                        "UPDATE users SET gemini_api_key = ?, last_login = ? WHERE user_id = ?",
-                        (api_key.strip() if api_key else None, now, user_id)
-                    )
-                elif model is not None:
-                    cursor.execute(
-                        "UPDATE users SET gemini_model = ?, last_login = ? WHERE user_id = ?",
-                        (model.strip(), now, user_id)
-                    )
-            conn.commit()
+            elif api_key is not None:
+                db.execute(
+                    "UPDATE users SET gemini_api_key = ?, last_login = ? WHERE user_id = ?",
+                    (api_key.strip() if api_key else None, now, user_id)
+                )
+            elif model is not None:
+                db.execute(
+                    "UPDATE users SET gemini_model = ?, last_login = ? WHERE user_id = ?",
+                    (model.strip(), now, user_id)
+                )
         return self.get_user_by_id(user_id) or {}
 
 

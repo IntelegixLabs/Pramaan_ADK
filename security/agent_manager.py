@@ -1,13 +1,7 @@
-import sqlite3
 import json
 import uuid
-import os
 from typing import Optional, List, Dict, Any
-
-if os.environ.get("VERCEL"):
-    DB_PATH = "/tmp/handshakeos.db"
-else:
-    DB_PATH = os.path.join(os.path.dirname(__file__), "..", "handshakeos.db")
+from security.db import db
 
 DEFAULT_AGENTS = [
     {
@@ -47,221 +41,116 @@ DEFAULT_AGENTS = [
 ]
 
 class AgentManager:
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = db_path
-        self._init_db()
-
-    def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS custom_agents (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    system_prompt TEXT,
-                    policies TEXT,
-                    max_budget INTEGER DEFAULT 10
-                )
-            ''')
-            columns_to_add = [
-                ('mcp_server_urls', 'TEXT'),
-                ('a2a_agent_urls', 'TEXT'),
-                ('provider', 'TEXT'),
-                ('runtime', 'TEXT'),
-                ('environment', 'TEXT'),
-                ('owner', 'TEXT'),
-                ('owner_email', 'TEXT'),
-                ('status', 'TEXT'),
-                ('risk_tier', 'TEXT'),
-                ('purpose', 'TEXT'),
-                ('allowed_tools', 'TEXT'),
-                ('denied_tools', 'TEXT'),
-                ('human_review_tools', 'TEXT'),
-                ('user_id', 'TEXT')
-            ]
-            for col_name, col_type in columns_to_add:
-                try:
-                    cursor.execute(f'ALTER TABLE custom_agents ADD COLUMN {col_name} {col_type}')
-                except sqlite3.OperationalError:
-                    pass
-
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS custom_tools (
-                    id TEXT PRIMARY KEY,
-                    agent_id TEXT,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    code TEXT,
-                    FOREIGN KEY(agent_id) REFERENCES custom_agents(id) ON DELETE CASCADE
-                )
-            ''')
-            conn.commit()
+    def __init__(self, db_path=None):
+        db.initialize()
 
     def get_all_agents(self, user_id: Optional[str] = None):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            if user_id:
-                cursor.execute('SELECT * FROM custom_agents WHERE user_id = ? OR user_id IS NULL', (user_id,))
-            else:
-                cursor.execute('SELECT * FROM custom_agents')
-            agents = [dict(row) for row in cursor.fetchall()]
-            for agent in agents:
-                agent['policies'] = json.loads(agent['policies']) if agent['policies'] else {}
-                agent['mcp_server_urls'] = json.loads(agent['mcp_server_urls']) if agent.get('mcp_server_urls') else []
-                agent['a2a_agent_urls'] = json.loads(agent['a2a_agent_urls']) if agent.get('a2a_agent_urls') else []
-                agent['allowed_tools'] = json.loads(agent['allowed_tools']) if agent.get('allowed_tools') else []
-                agent['denied_tools'] = json.loads(agent['denied_tools']) if agent.get('denied_tools') else []
-                agent['human_review_tools'] = json.loads(agent['human_review_tools']) if agent.get('human_review_tools') else []
-                cursor.execute('SELECT id, name, description, code FROM custom_tools WHERE agent_id = ?', (agent['id'],))
-                agent['tools'] = [dict(row) for row in cursor.fetchall()]
-                agent['is_default'] = False
+        if user_id:
+            rows = db.fetchall('SELECT * FROM custom_agents WHERE user_id = ? OR user_id IS NULL', (user_id,))
+        else:
+            rows = db.fetchall('SELECT * FROM custom_agents')
             
-            # Prepend default agents
-            return DEFAULT_AGENTS + agents
-
-    def get_agent(self, agent_id: str, user_id: Optional[str] = None):
-        # Check defaults first
-        for default_agent in DEFAULT_AGENTS:
-            if default_agent['id'] == agent_id:
-                return default_agent
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            if user_id:
-                cursor.execute('SELECT * FROM custom_agents WHERE id = ? AND (user_id = ? OR user_id IS NULL)', (agent_id, user_id))
-            else:
-                cursor.execute('SELECT * FROM custom_agents WHERE id = ?', (agent_id,))
-            row = cursor.fetchone()
-            if not row:
-                return None
-            agent = dict(row)
-            agent['policies'] = json.loads(agent['policies']) if agent['policies'] else {}
+        agents = []
+        for r in rows:
+            agent = dict(r)
+            agent['policies'] = json.loads(agent['policies']) if agent.get('policies') else {}
             agent['mcp_server_urls'] = json.loads(agent['mcp_server_urls']) if agent.get('mcp_server_urls') else []
             agent['a2a_agent_urls'] = json.loads(agent['a2a_agent_urls']) if agent.get('a2a_agent_urls') else []
             agent['allowed_tools'] = json.loads(agent['allowed_tools']) if agent.get('allowed_tools') else []
             agent['denied_tools'] = json.loads(agent['denied_tools']) if agent.get('denied_tools') else []
             agent['human_review_tools'] = json.loads(agent['human_review_tools']) if agent.get('human_review_tools') else []
+            agent['tools'] = json.loads(agent['tools']) if agent.get('tools') else []
             agent['is_default'] = False
-            cursor.execute('SELECT id, name, description, code FROM custom_tools WHERE agent_id = ?', (agent_id,))
-            agent['tools'] = [dict(row) for row in cursor.fetchall()]
-            return agent
+            agents.append(agent)
+        
+        # Prepend default agents
+        return DEFAULT_AGENTS + agents
+
+    def get_agent(self, agent_id: str, user_id: Optional[str] = None):
+        for default_agent in DEFAULT_AGENTS:
+            if default_agent['id'] == agent_id:
+                return default_agent
+
+        if user_id:
+            row = db.fetchone('SELECT * FROM custom_agents WHERE id = ? AND (user_id = ? OR user_id IS NULL)', (agent_id, user_id))
+        else:
+            row = db.fetchone('SELECT * FROM custom_agents WHERE id = ?', (agent_id,))
+            
+        if not row:
+            return None
+            
+        agent = dict(row)
+        agent['policies'] = json.loads(agent['policies']) if agent.get('policies') else {}
+        agent['mcp_server_urls'] = json.loads(agent['mcp_server_urls']) if agent.get('mcp_server_urls') else []
+        agent['a2a_agent_urls'] = json.loads(agent['a2a_agent_urls']) if agent.get('a2a_agent_urls') else []
+        agent['allowed_tools'] = json.loads(agent['allowed_tools']) if agent.get('allowed_tools') else []
+        agent['denied_tools'] = json.loads(agent['denied_tools']) if agent.get('denied_tools') else []
+        agent['human_review_tools'] = json.loads(agent['human_review_tools']) if agent.get('human_review_tools') else []
+        agent['tools'] = json.loads(agent['tools']) if agent.get('tools') else []
+        agent['is_default'] = False
+        return agent
 
     def create_agent(self, agent_data: dict, user_id: Optional[str] = None):
         agent_id = str(uuid.uuid4())
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO custom_agents (
-                    id, name, description, system_prompt, policies, max_budget, mcp_server_urls, a2a_agent_urls,
-                    provider, runtime, environment, owner, owner_email, status, risk_tier, purpose,
-                    allowed_tools, denied_tools, human_review_tools, user_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                agent_id,
-                agent_data.get('name', 'Custom Agent'),
-                agent_data.get('description', ''),
-                agent_data.get('system_prompt', 'You are a helpful assistant.'),
-                json.dumps(agent_data.get('policies', {})),
-                agent_data.get('max_budget', 10),
-                json.dumps(agent_data.get('mcp_server_urls', [])),
-                json.dumps(agent_data.get('a2a_agent_urls', [])),
-                agent_data.get('provider', 'Custom agent'),
-                agent_data.get('runtime', 'Python Runtime'),
-                agent_data.get('environment', 'Production'),
-                agent_data.get('owner', 'Unknown'),
-                agent_data.get('owner_email', 'unknown@example.com'),
-                agent_data.get('status', 'ACTIVE'),
-                agent_data.get('risk_tier', 'LOW'),
-                agent_data.get('purpose', ''),
-                json.dumps(agent_data.get('allowed_tools', [])),
-                json.dumps(agent_data.get('denied_tools', [])),
-                json.dumps(agent_data.get('human_review_tools', [])),
-                user_id or agent_data.get('user_id')
-            ))
-            
-            for tool in agent_data.get('tools', []):
-                tool_id = str(uuid.uuid4())
-                cursor.execute('''
-                    INSERT INTO custom_tools (id, agent_id, name, description, code)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    tool_id,
-                    agent_id,
-                    tool.get('name'),
-                    tool.get('description'),
-                    tool.get('code')
-                ))
-            conn.commit()
+        tools = agent_data.get('tools', [])
+        for tool in tools:
+            if not tool.get('id'):
+                tool['id'] = str(uuid.uuid4())
+
+        db.execute('''
+            INSERT INTO custom_agents (
+                id, name, description, system_prompt, policies, max_budget, tools, mcp_server_urls, a2a_agent_urls,
+                user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            agent_id,
+            agent_data.get('name', 'Custom Agent'),
+            agent_data.get('description', ''),
+            agent_data.get('system_prompt', 'You are a helpful assistant.'),
+            json.dumps(agent_data.get('policies', {})),
+            agent_data.get('max_budget', 10),
+            json.dumps(tools),
+            json.dumps(agent_data.get('mcp_server_urls', [])),
+            json.dumps(agent_data.get('a2a_agent_urls', [])),
+            user_id or agent_data.get('user_id')
+        ))
         return self.get_agent(agent_id, user_id)
 
     def update_agent(self, agent_id: str, agent_data: dict, user_id: Optional[str] = None):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            query = '''
-                UPDATE custom_agents 
-                SET name = ?, description = ?, system_prompt = ?, policies = ?, max_budget = ?, mcp_server_urls = ?, a2a_agent_urls = ?,
-                    provider = ?, runtime = ?, environment = ?, owner = ?, owner_email = ?, status = ?, risk_tier = ?, purpose = ?,
-                    allowed_tools = ?, denied_tools = ?, human_review_tools = ?
-                WHERE id = ?
-            '''
-            params = [
-                agent_data.get('name'),
-                agent_data.get('description'),
-                agent_data.get('system_prompt'),
-                json.dumps(agent_data.get('policies', {})),
-                agent_data.get('max_budget', 10),
-                json.dumps(agent_data.get('mcp_server_urls', [])),
-                json.dumps(agent_data.get('a2a_agent_urls', [])),
-                agent_data.get('provider', 'Custom agent'),
-                agent_data.get('runtime', 'Python Runtime'),
-                agent_data.get('environment', 'Production'),
-                agent_data.get('owner', 'Unknown'),
-                agent_data.get('owner_email', 'unknown@example.com'),
-                agent_data.get('status', 'ACTIVE'),
-                agent_data.get('risk_tier', 'LOW'),
-                agent_data.get('purpose', ''),
-                json.dumps(agent_data.get('allowed_tools', [])),
-                json.dumps(agent_data.get('denied_tools', [])),
-                json.dumps(agent_data.get('human_review_tools', [])),
-                agent_id
-            ]
-            if user_id:
-                query += ' AND (user_id = ? OR user_id IS NULL)'
-                params.append(user_id)
+        tools = agent_data.get('tools', [])
+        for tool in tools:
+            if not tool.get('id'):
+                tool['id'] = str(uuid.uuid4())
 
-            cursor.execute(query, tuple(params))
-            
-            # Recreate tools
-            cursor.execute('DELETE FROM custom_tools WHERE agent_id = ?', (agent_id,))
-            for tool in agent_data.get('tools', []):
-                tool_id = str(uuid.uuid4())
-                cursor.execute('''
-                    INSERT INTO custom_tools (id, agent_id, name, description, code)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    tool_id,
-                    agent_id,
-                    tool.get('name'),
-                    tool.get('description'),
-                    tool.get('code')
-                ))
-            conn.commit()
+        query = '''
+            UPDATE custom_agents 
+            SET name = ?, description = ?, system_prompt = ?, policies = ?, max_budget = ?, tools = ?, mcp_server_urls = ?, a2a_agent_urls = ?
+            WHERE id = ?
+        '''
+        params = [
+            agent_data.get('name'),
+            agent_data.get('description'),
+            agent_data.get('system_prompt'),
+            json.dumps(agent_data.get('policies', {})),
+            agent_data.get('max_budget', 10),
+            json.dumps(tools),
+            json.dumps(agent_data.get('mcp_server_urls', [])),
+            json.dumps(agent_data.get('a2a_agent_urls', [])),
+            agent_id
+        ]
+        if user_id:
+            query += ' AND (user_id = ? OR user_id IS NULL)'
+            params.append(user_id)
+
+        db.execute(query, tuple(params))
         return self.get_agent(agent_id, user_id)
 
     def delete_agent(self, agent_id: str, user_id: Optional[str] = None):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            if user_id:
-                cursor.execute('DELETE FROM custom_tools WHERE agent_id IN (SELECT id FROM custom_agents WHERE id = ? AND (user_id = ? OR user_id IS NULL))', (agent_id, user_id))
-                cursor.execute('DELETE FROM custom_agents WHERE id = ? AND (user_id = ? OR user_id IS NULL)', (agent_id, user_id))
-            else:
-                cursor.execute('DELETE FROM custom_tools WHERE agent_id = ?', (agent_id,))
-                cursor.execute('DELETE FROM custom_agents WHERE id = ?', (agent_id,))
-            conn.commit()
+        if user_id:
+            db.execute('DELETE FROM custom_agents WHERE id = ? AND (user_id = ? OR user_id IS NULL)', (agent_id, user_id))
+        else:
+            db.execute('DELETE FROM custom_agents WHERE id = ?', (agent_id,))
         return True
 
 agent_manager = AgentManager()
