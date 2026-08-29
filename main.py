@@ -1890,12 +1890,36 @@ async def scan_agent(body: dict, current_user: Optional[dict] = Depends(get_opti
     from agents.security_scanner_agent import SecurityScannerAgent
     scanner = SecurityScannerAgent()
     redteam_config = body.get("redteam") or {}
+
+    user_api_key = None
+    user_model = None
+
     if current_user:
-        if current_user.get("gemini_api_key"):
-            redteam_config["api_key"] = current_user["gemini_api_key"]
-        if current_user.get("gemini_model"):
-            redteam_config["simulator_model"] = current_user["gemini_model"]
-            redteam_config["evaluation_model"] = current_user["gemini_model"]
+        user_api_key = current_user.get("gemini_api_key")
+        user_model = current_user.get("gemini_model")
+
+    if not user_api_key:
+        user_api_key = body.get("api_key") or redteam_config.get("api_key")
+
+    if not user_api_key:
+        try:
+            from security.db import db
+            row = db.fetchone("SELECT gemini_api_key, gemini_model FROM users WHERE gemini_api_key IS NOT NULL AND gemini_api_key != '' ORDER BY last_login DESC LIMIT 1")
+            if row:
+                user_api_key = row.get("gemini_api_key")
+                user_model = user_model or row.get("gemini_model")
+        except Exception:
+            pass
+
+    if user_api_key:
+        redteam_config["api_key"] = user_api_key
+        os.environ["GOOGLE_API_KEY"] = user_api_key
+        os.environ["GEMINI_API_KEY"] = user_api_key
+
+    if user_model:
+        redteam_config["simulator_model"] = user_model
+        redteam_config["evaluation_model"] = user_model
+
     report = await scanner.scan(used_url, card, base_report, config=redteam_config)
 
     report["raw_card"] = card  # Include raw card for reference

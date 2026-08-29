@@ -153,15 +153,20 @@ class SecurityScannerAgent:
             })
             return self._merge_reports(base_report, dynamic_findings)
 
-        if not os.getenv("GOOGLE_API_KEY"):
+        user_key = config.get("api_key") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not user_key:
             dynamic_findings.append({
                 "title": "Red Team Scan Skipped",
-                "finding": "GOOGLE_API_KEY not configured",
+                "finding": "Google API key not configured",
                 "severity": "info",
-                "description": "DeepTeam red teaming requires a Google API key.",
-                "recommendation": "Set GOOGLE_API_KEY environment variable to enable dynamic simulation."
+                "description": "DeepTeam red teaming requires a Google API key. Please save your API key in Gemini LLM Studio or set GOOGLE_API_KEY.",
+                "recommendation": "Save your Gemini API Key in the top-right Gemini LLM Studio to enable dynamic simulation."
             })
             return self._merge_reports(base_report, dynamic_findings)
+
+        # Ensure environment variable is set for DeepTeam / deepeval
+        os.environ["GOOGLE_API_KEY"] = user_key
+        os.environ["GEMINI_API_KEY"] = user_key
 
         # ── Resolve scan parameters from config (with fast defaults) ──
         vuln_keys = config.get("vulnerabilities")
@@ -173,13 +178,8 @@ class SecurityScannerAgent:
         from deepeval.models import GeminiModel
         sim_model_name = (config.get("simulator_model") or os.getenv("DEEPTEAM_SIMULATOR_MODEL", "gemini-2.5-flash")).replace("gemini/", "")
         eval_model_name = (config.get("evaluation_model") or os.getenv("DEEPTEAM_EVALUATOR_MODEL", "gemini-2.5-flash")).replace("gemini/", "")
-        user_key = config.get("api_key")
-        if user_key:
-            simulator_model = GeminiModel(model=sim_model_name, api_key=user_key)
-            evaluation_model = GeminiModel(model=eval_model_name, api_key=user_key)
-        else:
-            simulator_model = GeminiModel(model=sim_model_name)
-            evaluation_model = GeminiModel(model=eval_model_name)
+        simulator_model = GeminiModel(model=sim_model_name, api_key=user_key)
+        evaluation_model = GeminiModel(model=eval_model_name, api_key=user_key)
 
         import sys
         import io
