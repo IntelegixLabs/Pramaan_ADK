@@ -42,7 +42,7 @@ def _now_iso() -> str:
 # ────────────────────────────────────────────────────────────────
 
 @router.post("/run")
-async def agui_run(request: Request):
+async def agui_run(request: Request, current_user: Optional[dict] = Depends(get_optional_user)):
     """
     AG-UI protocol endpoint.
     Accepts RunAgentInput and streams AG-UI events via SSE.
@@ -90,7 +90,7 @@ async def agui_run(request: Request):
                     yield evt
             elif scenario.startswith("custom_agent_"):
                 agent_id = scenario.replace("custom_agent_", "")
-                async for evt in _run_custom_agent(encoder, thread_id, run_id, agent_id, messages, options):
+                async for evt in _run_custom_agent(encoder, thread_id, run_id, agent_id, messages, options, user=current_user):
                     yield evt
             else:
                 async for evt in _demo_valid_handshake(encoder, thread_id, run_id, amount):
@@ -905,7 +905,7 @@ async def agui_status(current_user: Optional[Dict[str, Any]] = Depends(get_optio
         ],
     }
 
-async def _run_custom_agent(encoder: EventEncoder, thread_id: str, run_id: str, agent_id: str, messages: list, options: dict = None):
+async def _run_custom_agent(encoder: EventEncoder, thread_id: str, run_id: str, agent_id: str, messages: list, options: dict = None, user: Optional[dict] = None):
     options = options or {}
     from agents.custom_agent import CustomAgentRunner
     
@@ -930,7 +930,7 @@ async def _run_custom_agent(encoder: EventEncoder, thread_id: str, run_id: str, 
             user_message = messages[-1].get("content", "Hello")
 
         # Determine LLM used and Risk Score
-        llm_info = get_llm_info()
+        llm_info = get_llm_info(user=user)
         llm_used = f"{llm_info.provider} ({llm_info.model})"
         
         # Calculate a real risk score based on the message content and sentinel heuristics
@@ -974,7 +974,7 @@ async def _run_custom_agent(encoder: EventEncoder, thread_id: str, run_id: str, 
         # THIS same server (localhost:8200/mcp-proxy/...). Running that on the
         # event-loop thread deadlocks the server: the loop would be blocked here
         # and therefore unable to serve its own discovery connection.
-        runner = await loop.run_in_executor(None, CustomAgentRunner, agent_id)
+        runner = await loop.run_in_executor(None, lambda: CustomAgentRunner(agent_id, user=user))
 
         yield encoder.encode(CustomEvent(type=EventType.CUSTOM, name="governance_step", value={
             "step": "agent_execution", "status": "running", "detail": f"Executing with tools: {[t.name for t in runner.tools]}"
