@@ -141,29 +141,36 @@ class MCPSecurityScannerAgent:
         return self._build_report(target_url, discovery, disc_error, findings, red_team, fetch_ms)
 
     # ── One session: enumerate + run all selected probes ─────────────────────
-    def _resolve_local_mcp(self, target_url: str):
-        """If target_url is a Pramaan proxy URL, resolve to the hosted script path."""
+    def _resolve_mcp_target(self, target_url: str):
+        """If target_url is a Pramaan proxy URL, resolve to either hosted script or upstream server URL."""
         import re, os, sys
         from security.mcp_manager import mcp_manager
-        match = re.search(r'/mcp-proxy/([a-f0-9\-]{36})', target_url)
+        match = re.search(r'/mcp-proxy/([a-f0-9\-]{36}|mcp-[a-zA-Z0-9\-]+)', target_url)
         if not match:
-            return None, None
+            return None, None, target_url
         mcp_id = match.group(1)
         mcp_data = mcp_manager.get_mcp(mcp_id)
-        if not mcp_data or not mcp_data.get("is_hosted"):
-            return None, None
-        script_path = os.path.join(os.path.dirname(__file__), '..', 'hosted_mcps', f"{mcp_id}.py")
-        if not os.path.exists(script_path):
-            return None, None
-        return os.path.abspath(script_path), sys.executable
+        if not mcp_data:
+            return None, None, target_url
+
+        if mcp_data.get("is_hosted"):
+            script_path = os.path.join(os.path.dirname(__file__), '..', 'hosted_mcps', f"{mcp_id}.py")
+            if os.path.exists(script_path):
+                return os.path.abspath(script_path), sys.executable, target_url
+
+        upstream = mcp_data.get("server_url")
+        if upstream:
+            return None, None, upstream
+
+        return None, None, target_url
 
     async def _connect_and_probe(self, target_url, selected_checks) -> Tuple[Dict, str, List[Dict]]:
         discovery = {"tools": [], "resources": [], "prompts": []}
         red_team: List[Dict] = []
         error = None
 
-        # Check if this is a local hosted MCP (use stdio) or remote (use SSE)
-        local_script, python_exe = self._resolve_local_mcp(target_url)
+        # Check if this is a local hosted MCP (use stdio) or remote (use SSE / Streamable HTTP)
+        local_script, python_exe, effective_url = self._resolve_mcp_target(target_url)
 
         async def _enumerate_and_probe(session):
             """Shared logic: enumerate capabilities then run red-team checks."""
@@ -208,26 +215,71 @@ class MCPSecurityScannerAgent:
                     await session.initialize()
                     return await _enumerate_and_probe(session)
 
-        async def _run_sse():
-            """Connect to a remote MCP via SSE transport."""
-            from mcp.client.sse import sse_client
+        async def _run_remote(url_to_probe: str):
+            """Connect to a remote MCP via Streamable HTTP or SSE transport."""
             from mcp.client.session import ClientSession
-            async with sse_client(target_url) as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    return await _enumerate_and_probe(session)
+            is_streamable_hint = "/mcp" in url_to_probe.lower() and not url_to_probe.lower().endswith("/sse")
+            
+            if is_streamable_hint:
+                try:
+                    from mcp.client.streamable_http import streamable_http_client
+                    async with streamable_http_client(url_to_probe) as (r_stream, w_stream, _):
+                        async with ClientSession(r_stream, w_stream) as session:
+                            await session.initialize()
+                            return await _enumerate_and_probe(session)
+                except Exception as streamable_err:
+                    logger.info(f"Streamable HTTP attempt failed: {streamable_err}, trying SSE")
+
+            try:
+                from mcp.client.sse import sse_client
+                async with sse_client(url_to_probe, timeout=8.0, sse_read_timeout=8.0) as streams:
+                    async with ClientSession(streams[0], streams[1]) as session:
+                        await session.initialize()
+                        return await _enumerate_and_probe(session)
+            except Exception as sse_err:
+                if not is_streamable_hint:
+                    try:
+                        from mcp.client.streamable_http import streamable_http_client
+                        async with streamable_http_client(url_to_probe) as (r_stream, w_stream, _):
+                            async with ClientSession(r_stream, w_stream) as session:
+                                await session.initialize()
+                                return await _enumerate_and_probe(session)
+                    except Exception:
+                        pass
+                raise sse_err
 
         try:
             if local_script:
                 logger.info(f"MCP Sentinel: using STDIO transport for local hosted MCP: {local_script}")
-                discovery, red_team = await asyncio.wait_for(_run_stdio(), timeout=60)
+                discovery, red_team = await asyncio.wait_for(_run_stdio(), timeout=30)
             else:
-                logger.info(f"MCP Sentinel: using SSE transport for remote MCP: {target_url}")
-                discovery, red_team = await asyncio.wait_for(_run_sse(), timeout=60)
+                logger.info(f"MCP Sentinel: using Remote transport for: {effective_url} (requested: {target_url})")
+                discovery, red_team = await asyncio.wait_for(_run_remote(effective_url), timeout=20)
         except asyncio.TimeoutError:
-            error = "Connection timed out (60s) while scanning the MCP server. Is the SSE endpoint reachable?"
+            error = "Connection timed out while scanning the MCP server. Is the SSE endpoint reachable and accepting connections?"
         except Exception as e:
-            error = f"Failed to connect / enumerate the MCP server: {str(e)[:200]}"
+            msg_parts = []
+            def _recurse_exc(exc):
+                if hasattr(exc, 'exceptions') and getattr(exc, 'exceptions', None):
+                    for sub in exc.exceptions:
+                        _recurse_exc(sub)
+                else:
+                    import httpx
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status = exc.response.status_code
+                        if status in (401, 403):
+                            msg_parts.append(f"HTTP {status} Unauthorized: Server requires authentication credentials/token.")
+                        elif status == 404:
+                            msg_parts.append(f"HTTP 404 Not Found: SSE endpoint not found.")
+                        else:
+                            msg_parts.append(f"HTTP {status} Error: {str(exc)}")
+                    elif isinstance(exc, httpx.ConnectError):
+                        msg_parts.append(f"Connection Failed: Could not reach endpoint ({str(exc)})")
+                    else:
+                        msg_parts.append(str(exc))
+            _recurse_exc(e)
+            unwrapped = " | ".join(dict.fromkeys(msg_parts)) if msg_parts else str(e)
+            error = f"Failed to connect / enumerate the MCP server: {unwrapped[:300]}"
 
         return discovery, error, red_team
 
