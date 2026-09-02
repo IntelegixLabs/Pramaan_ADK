@@ -5,10 +5,15 @@ from typing import Optional, List, Dict, Any
 from security.db import db
 
 def _get_backend_base() -> str:
+    # On Cloud Run, Google automatically injects K_SERVICE
+    if os.getenv("K_SERVICE"):
+        return (
+            os.getenv("BACKEND_URL")
+            or os.getenv("API_BASE_URL")
+            or "https://pramaan-adk-758418893931.europe-west1.run.app"
+        ).rstrip("/")
     return (
-        os.getenv("BACKEND_URL")
-        or os.getenv("API_BASE_URL")
-        or os.getenv("VITE_PROXY_URL_BASE")
+        os.getenv("LOCAL_BACKEND_URL")
         or "http://localhost:8200"
     ).rstrip("/")
 
@@ -44,18 +49,19 @@ class MCPManager:
         db.initialize()
 
     def _extract_capabilities(self, mcp_data: dict):
-        is_hosted = mcp_data.get('is_hosted', False) or mcp_data.get('transport') == 'python'
+        raw_transport = mcp_data.get('transport')
+        is_hosted = mcp_data.get('is_hosted', False) or raw_transport in ('python', 'webmcp')
         
         if is_hosted:
             tools = mcp_data.get('hosted_tools') if mcp_data.get('hosted_tools') is not None else (mcp_data.get('tools') or [])
             resources = mcp_data.get('hosted_resources') if mcp_data.get('hosted_resources') is not None else (mcp_data.get('resources') or [])
             prompts = mcp_data.get('hosted_prompts') if mcp_data.get('hosted_prompts') is not None else (mcp_data.get('prompts') or [])
-            transport = 'python'
+            transport = raw_transport if raw_transport in ('python', 'webmcp') else 'python'
         else:
             tools = mcp_data.get('allowed_tools') if mcp_data.get('allowed_tools') is not None else (mcp_data.get('tools') or [])
             resources = mcp_data.get('allowed_resources') if mcp_data.get('allowed_resources') is not None else (mcp_data.get('resources') or [])
             prompts = mcp_data.get('allowed_prompts') if mcp_data.get('allowed_prompts') is not None else (mcp_data.get('prompts') or [])
-            transport = mcp_data.get('transport') or 'sse'
+            transport = raw_transport or 'sse'
 
         return transport, tools or [], resources or [], prompts or []
 

@@ -273,14 +273,21 @@ from security.agent_manager import agent_manager
 
 def get_backend_base_url(request: Optional[Request] = None) -> str:
     """Return configured backend URL from environment or fallback to incoming request/localhost."""
-    env_url = (
-        os.getenv("BACKEND_URL")
-        or os.getenv("API_BASE_URL")
-        or os.getenv("VITE_PROXY_URL_BASE")
-        or os.getenv("PUBLIC_URL")
-    )
-    if env_url:
+    if request:
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", ""))
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        if host and ("localhost" in host or "127.0.0.1" in host):
+            return f"{proto}://{host}".rstrip("/")
+            
+    if os.getenv("K_SERVICE"):
+        env_url = (
+            os.getenv("BACKEND_URL")
+            or os.getenv("API_BASE_URL")
+            or os.getenv("PUBLIC_URL")
+            or "https://pramaan-adk-758418893931.europe-west1.run.app"
+        )
         return env_url.rstrip("/")
+
     if request:
         proto = request.headers.get("x-forwarded-proto", request.url.scheme)
         host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost:8200"))

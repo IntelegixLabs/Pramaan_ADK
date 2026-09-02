@@ -137,9 +137,11 @@ async def mcp_proxy_get(mcp_id: str, request: Request):
         return EventSourceResponse(event_generator())
         
     else:
-        # For remote MCP servers, we would ideally proxy to their SSE endpoint
-        # For now, return a NotImplemented error if it's a remote proxy attempt
-        raise HTTPException(status_code=501, detail="Remote proxying not yet implemented in Pramaan")
+        server_url = mcp_data.get("server_url")
+        if server_url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=server_url, status_code=307)
+        raise HTTPException(status_code=400, detail="MCP server has no server_url configured")
 
 @router.post("/messages")
 async def mcp_proxy_post(request: Request, session_id: str):
